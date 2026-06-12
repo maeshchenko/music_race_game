@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildCar } from './car';
+import { IS_MOBILE } from '../platform';
 
 /**
  * Вечерняя провинция: дорога, панельки с тёплыми окнами, натриевые фонари,
@@ -11,7 +12,7 @@ const CHUNK_LEN = 60;
 const CHUNKS = 13; // ~780 м видимой улицы
 const LAMP_SPACING = 20;
 const ROAD_W = 9;
-const POOLED_LIGHTS = 4;
+const POOLED_LIGHTS = IS_MOBILE ? 2 : 4;
 
 /** Высота мира в точке z (мировая координата, вперёд = -z). */
 export type HeightFn = (z: number) => number;
@@ -162,7 +163,7 @@ export class World {
   private pooled: THREE.SpotLight[] = [];
   private snow!: THREE.Points;
   private snowVel: Float32Array;
-  private readonly SNOW_N = 1600;
+  private readonly SNOW_N = IS_MOBILE ? 700 : 1600;
   private readonly SNOW_BOX = new THREE.Vector3(50, 22, 70);
 
   constructor(

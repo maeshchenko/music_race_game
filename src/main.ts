@@ -2,9 +2,16 @@ import * as Tone from 'tone';
 import { type Song } from 'midi-gen/core';
 import { createPlayer, type Player } from 'midi-gen/audio';
 
+import { IS_MOBILE } from './platform';
+
 // большой аудиобуфер: живой синтез тяжёлый, при потере фокуса macOS режет
-// приоритет Chrome — с маленьким буфером звук захлёбывается и не встаёт
-Tone.setContext(new Tone.Context({ latencyHint: 'playback' }));
+// приоритет Chrome — с маленьким буфером звук захлёбывается и не встаёт.
+// На телефонах вдобавок половиним частоту дискретизации — DSP в ~2 раза
+// дешевле, иначе синтез не успевает и звук с игрой заикаются.
+Tone.setContext(new Tone.Context({
+  latencyHint: 'playback',
+  ...(IS_MOBILE ? { sampleRate: 24000 } : {}),
+}));
 import { newSong, songDurationSec, formatDuration, GENRES, type GameGenre } from './music';
 import { Game } from './game/game';
 import { buildLevel } from './game/level';
@@ -222,7 +229,12 @@ function backToMenu() {
 menu.querySelector('#regen')?.addEventListener('click', genTracks);
 menu.querySelector('#start')!.addEventListener('click', () => void startRide());
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && (game || results)) backToMenu();
+  if (e.key === 'Escape') {
+    // в заезде Esc открывает паузу; из паузы/результатов — в главное меню
+    if (results) backToMenu();
+    else if (game && game.paused) backToMenu();
+    else if (game) pauseGame();
+  }
   if (e.code === 'Space' && game) {
     e.preventDefault(); // чтобы пробел не «нажимал» сфокусированную кнопку
     if (game.paused) resumeGame();
@@ -247,7 +259,7 @@ function pauseGame() {
       <input type="range" id="vol-music" min="0" max="100" value="${vol.music}"></div>
     <div class="vol-row"><span>эффекты</span>
       <input type="range" id="vol-sfx" min="0" max="100" value="${vol.sfx}"></div>
-    <p class="sub">клик или пробел — продолжить · Esc — в меню</p></div>`;
+    <p class="sub">клик или пробел — продолжить · Esc — выйти в меню</p></div>`;
   pauseOverlay.addEventListener('click', (e) => {
     // клики по ползункам не снимают паузу
     if ((e.target as HTMLElement).closest('.vol-row')) return;

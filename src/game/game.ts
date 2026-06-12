@@ -4,6 +4,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { Player } from 'midi-gen/audio';
+import { IS_MOBILE } from '../platform';
 import { World } from './world';
 import { buildCar } from './car';
 import { Blocks, LANE_COLORS, LANE_CSS, type Difficulty } from './blocks';
@@ -18,7 +19,7 @@ const STEER_RANGE = 3.2;
 
 export class Game {
   private renderer: THREE.WebGLRenderer;
-  private composer: EffectComposer;
+  private composer: EffectComposer | null = null;
   private camera: THREE.PerspectiveCamera;
   private world: World;
   private car = buildCar();
@@ -83,8 +84,9 @@ export class Game {
       gate.rotation.y = -Math.atan(dir);
       this.world.scene.add(gate);
     }
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    // телефон: без antialias/bloom, pixelRatio ниже — GPU и так впритык
+    this.renderer = new THREE.WebGLRenderer({ antialias: !IS_MOBILE });
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE ? 1.5 : 2));
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -92,13 +94,15 @@ export class Game {
 
     this.camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 400);
 
-    // bloom: светится только яркое — неон-блоки, фонари, окна
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.world.scene, this.camera));
-    this.composer.addPass(new UnrealBloomPass(
-      new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.5, 0.82,
-    ));
-    this.composer.addPass(new OutputPass());
+    if (!IS_MOBILE) {
+      // bloom: светится только яркое — неон-блоки, фонари, окна
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.addPass(new RenderPass(this.world.scene, this.camera));
+      this.composer.addPass(new UnrealBloomPass(
+        new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.5, 0.82,
+      ));
+      this.composer.addPass(new OutputPass());
+    }
 
     this.hud = document.createElement('div');
     this.hud.className = 'hud';
@@ -200,7 +204,7 @@ export class Game {
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(innerWidth, innerHeight);
-    this.composer.setSize(innerWidth, innerHeight);
+    this.composer?.setSize(innerWidth, innerHeight);
   };
 
   start() {
@@ -403,7 +407,8 @@ export class Game {
       ` · ${kmh} км/ч · ${fmt(t)} / ${fmt(this.level.durationSec)}`;
 
     this.world.update(dt, this.car.position);
-    this.composer.render();
+    if (this.composer) this.composer.render();
+    else this.renderer.render(this.world.scene, this.camera);
   }
 
   dispose() {
@@ -421,7 +426,7 @@ export class Game {
     this.particles.dispose();
     this.sfx.dispose();
     this.world.dispose();
-    this.composer.dispose();
+    this.composer?.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
     this.hud.remove();
