@@ -179,8 +179,8 @@ export class Game {
     setTimeout(() => el.remove(), 1100);
   }
 
-  private popFx(pts: number) {
-    this.pop(`+${pts}`, 'pop-pts');
+  /** Вехи комбо. true — названная веха: ей положены вспышка и тряска. */
+  private popFx(): boolean {
     const c = this.combo;
     if (c === 5) this.pop('x5 ПОЕХАЛИ!', 'pop-combo');
     else if (c === 10) this.pop('x10 СУПЕР!', 'pop-combo pop-super');
@@ -188,7 +188,37 @@ export class Game {
     else if (c === 30) this.pop('x30 НЕОН!!!', 'pop-combo pop-mega');
     else if (c === 50) this.pop('x50 ЛЕГЕНДА!', 'pop-combo pop-mega');
     else if (c > 50 && c % 25 === 0) this.pop(`x${c} БЕЗУМИЕ!`, 'pop-combo pop-mega');
-    else if (c > 1 && c % 5 === 0) this.pop(`x${c}`, 'pop-combo');
+    else {
+      if (c > 1 && c % 5 === 0) this.pop(`x${c}`, 'pop-combo');
+      return false;
+    }
+    return true;
+  }
+
+  /** Счёт в HUD «вздрагивает» вместо всплывашки «+очки» на каждый блок. */
+  private scoreBump() {
+    this.hud.classList.remove('bump');
+    void this.hud.offsetWidth; // перезапуск CSS-анимации
+    this.hud.classList.add('bump');
+  }
+
+  /**
+   * Срыв: падение на предыдущую веху (x30 → x20), не в ноль — качели
+   * «всё-или-ничего» выбивают из потока. Fever гаснет, только если комбо
+   * упало ниже порога.
+   */
+  private breakCombo() {
+    if (this.combo > 50) {
+      this.combo = 50 + Math.floor((this.combo - 1 - 50) / 25) * 25;
+    } else {
+      let down = 0;
+      for (const m of [5, 10, 15, 20, 30, 50]) if (m < this.combo) down = m;
+      this.combo = down;
+    }
+    if (this.fever && this.combo < 15) {
+      this.fever = false;
+      this.feverEdge.classList.remove('on');
+    }
   }
 
   private onMouse = (e: MouseEvent) => {
@@ -340,16 +370,23 @@ export class Game {
         );
         this.score += pts;
         this.sfx.collect(this.combo, this.fever, b.count);
-        this.popFx(pts);
-        // сочность: искры цвета блока, вспышка, микро-тряска
+        this.scoreBump();
+        const milestone = this.popFx();
+        // искры — на каждый блок; вспышка и тряска — только на события,
+        // иначе на длинной сессии глаз выгорает и события не читаются
         this.particles.burst(b.x, b.y, -b.dist, LANE_COLORS[b.lane + 1], 12 + b.count * 6);
-        this.flash(LANE_CSS[b.lane + 1]);
-        this.shake = Math.min(0.45, this.shake + 0.08 + b.count * 0.04);
+        if (milestone) {
+          this.flash(LANE_CSS[b.lane + 1]);
+          this.shake = Math.min(0.45, this.shake + 0.3);
+        } else if (b.count > 1) {
+          this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
+        }
         if (hadMiss && Math.random() < 0.4) this.pop('ДАВАЙ ЕЩЁ!', 'pop-combo');
         if (!this.fever && this.combo >= 15) {
           this.fever = true;
           this.feverEdge.classList.add('on');
           this.pop('🔥 FEVER x2', 'pop-combo pop-mega');
+          this.flash('#ff44ff');
           this.shake = 0.6;
         }
       },
@@ -357,27 +394,19 @@ export class Game {
         // прощающее комбо: одиночный промах — тишина
         this.missStreak++;
         if (this.missStreak >= this.missLimit && this.combo > 0) {
-          this.combo = 0;
           this.missStreak = 0;
-          if (this.fever) {
-            this.fever = false;
-            this.feverEdge.classList.remove('on');
-          }
+          this.breakCombo();
           this.sfx.miss();
         }
       },
     );
 
-    // трафик: столкновение = сброс комбо и штраф, но не смерть
+    // трафик: столкновение = откат комбо и штраф, но не смерть
     const hitObs = this.traffic.update(t, this.level, dist, cx + this.carX);
     if (hitObs && t > this.invulnUntil) {
       this.invulnUntil = t + 1.5;
-      this.combo = 0;
       this.missStreak = 0;
-      if (this.fever) {
-        this.fever = false;
-        this.feverEdge.classList.remove('on');
-      }
+      this.breakCombo();
       this.score = Math.max(0, this.score - 50);
       this.sfx.crash();
       this.pop('💥', 'pop-combo pop-crash');

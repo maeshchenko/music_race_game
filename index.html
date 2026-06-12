@@ -140,6 +140,31 @@
         text-shadow: 0 0 18px var(--sodium);
       }
       .res-stats { margin-top: 0.6rem; color: var(--concrete); font-size: 0.9rem; line-height: 1.6; }
+      /* оверлей результатов: сцена видна, клик в любом месте — следующий трек */
+      .results-overlay {
+        position: absolute; inset: 0; z-index: 8;
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: flex-start; padding-top: 9vh;
+        text-align: center; cursor: pointer;
+      }
+      .results-overlay > * {
+        background: rgba(16, 17, 23, 0.66);
+        padding: 0.15rem 1.4rem;
+      }
+      .res-title {
+        color: var(--sodium); font-size: 2rem; letter-spacing: 0.45em;
+        text-shadow: 0 0 14px rgba(255, 165, 77, 0.5);
+        padding-top: 0.6rem;
+      }
+      .res-delta { margin-top: 0.4rem; color: var(--sodium); font-size: 1.05rem; }
+      .res-delta-up {
+        color: #4dffae; text-shadow: 0 0 10px #0fa;
+        animation: pop-shake 0.4s ease-in-out;
+      }
+      .res-next { margin-top: 0.9rem; color: #c9ccd2; font-size: 0.95rem; }
+      .res-next #cnt { color: var(--sodium); font-size: 1.2rem; }
+      .results-overlay button { pointer-events: auto; }
+      .res-hint { margin-top: 0.5rem; color: #565963; font-size: 0.72rem; letter-spacing: 0.1em; }
       .rec-glow {
         color: #4dffae !important;
         text-shadow: 0 0 14px #0fa, 0 0 40px #0fa !important;
@@ -151,6 +176,14 @@
         color: #c9ccd2; font-size: 0.9rem; letter-spacing: 0.12em;
         text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
         pointer-events: none;
+        transform-origin: left center;
+      }
+      /* счёт «вздрагивает» на каждый блок — вместо всплывашки в центре экрана */
+      .hud.bump { animation: hud-bump 0.18s ease-out; }
+      @keyframes hud-bump {
+        0% { transform: scale(1); }
+        40% { transform: scale(1.14); color: #fff; }
+        100% { transform: scale(1); }
       }
       .fx-layer {
         position: absolute; inset: 0; z-index: 6;

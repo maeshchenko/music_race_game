@@ -70,6 +70,19 @@ let player: Player | null = null;
 let game: Game | null = null;
 let results: HTMLDivElement | null = null;
 let replayRequested = false; // «ЕЩЁ РАЗ» — не перегенерировать трек
+let nextSong: Song | null = null; // следующий трек: генерится в фоне во время заезда
+let countdownTimer = 0;
+
+const randomGenre = (): GameGenre => GENRES[Math.floor(Math.random() * GENRES.length)];
+
+/** Генерация следующего трека заранее — переход между заездами без паузы. */
+function pregenNext() {
+  const idle: (f: () => void) => void =
+    'requestIdleCallback' in window
+      ? (f) => requestIdleCallback(f)
+      : (f) => void setTimeout(f, 1200);
+  idle(() => { if (!nextSong) nextSong = newSong(randomGenre()); });
+}
 // --- громкость: музыка через мастер, эффекты — смещением в Sfx ----------
 const VOL_KEY = 'race2107:vol';
 let vol = { music: 55, sfx: 70 };
@@ -114,6 +127,15 @@ const loadRec = (code: string, d: Difficulty): Rec | null => {
 const saveRec = (code: string, d: Difficulty, r: Rec) =>
   localStorage.setItem(recKey(code, d), JSON.stringify(r));
 
+// глобальный рекорд: треки каждый заезд новые, по song.code сравнивать не с чем —
+// «погоня за рекордом» работает только против общего лучшего счёта
+const BEST_KEY = 'race2107:best';
+const loadBest = (): Rec | null => {
+  try { return JSON.parse(localStorage.getItem(BEST_KEY) ?? 'null'); }
+  catch { return null; }
+};
+const saveBest = (r: Rec) => localStorage.setItem(BEST_KEY, JSON.stringify(r));
+
 // --- меню ------------------------------------------------------------------
 
 function genTracks() {
@@ -156,11 +178,15 @@ function renderDiffs() {
 // --- игровой цикл ----------------------------------------------------------
 
 async function startRide() {
-  results?.remove();
-  results = null;
+  clearResults();
   menu.style.display = 'none';
-  // простой флоу: каждый заезд — свежий случайный outrun
-  if (SIMPLE_MENU && !replayRequested) tracks = [newSong('outrun')], sel = 0;
+  // простой флоу: каждый заезд — свежий случайный трек (жанр тоже случайный),
+  // следующий уже готов из pregenNext — без паузы между заездами
+  if (SIMPLE_MENU && !replayRequested) {
+    tracks = [nextSong ?? newSong(randomGenre())];
+    nextSong = null;
+    sel = 0;
+  }
   replayRequested = false;
   const song = tracks[sel];
   player = createPlayer(song, { loop: false });
@@ -170,6 +196,7 @@ async function startRide() {
   game.start();
   applyVolumes(); // смещение эффектов — на свежесозданный Sfx
   await player.play();
+  pregenNext();
   Object.assign(window as never, { __player: player, __game: game }); // отладка
 }
 
@@ -183,45 +210,79 @@ function teardownRide() {
   game = null;
 }
 
+/**
+ * Оверлей результатов поверх сцены (машина докатилась, мир живой) +
+ * автопереход на следующий трек. Меню между заездами не появляется:
+ * продолжение — дефолт, выход — усилие (Esc).
+ */
 function showResults() {
   if (!game) return;
   const song = tracks[sel];
   const { score, maxCombo, collected, blocksTotal } = game;
   const prev = loadRec(song.code, diff);
-  const isRecord = !prev || score > prev.score;
-  if (isRecord) saveRec(song.code, diff, { score, combo: maxCombo });
-  teardownRide();
+  if (!prev || score > prev.score) saveRec(song.code, diff, { score, combo: maxCombo });
+  const best = loadBest();
+  const isBest = !best || score > best.score;
+  if (isBest) saveBest({ score, combo: maxCombo });
+  game.releasePointer(); // курсор обратно — кликнуть кнопку оверлея
 
+  // дельта до рекорда: близость, не провал — главный крючок «ещё раз»
+  const delta = !best ? ''
+    : isBest ? `<div class="res-delta res-delta-up">рекорд побит на ${score - best.score}!</div>`
+    : `<div class="res-delta">до рекорда не хватило ${best.score - score}</div>`;
+
+  let left = 5;
   results = document.createElement('div');
-  results.className = 'menu';
+  results.className = 'results-overlay';
   results.innerHTML = `
-    <div class="panel">
-      <h1 class="${isRecord ? 'rec-glow' : ''}">${isRecord ? 'РЕКОРД!' : 'ФИНИШ'}</h1>
-      <p class="sub">${song.title} · ${song.genre} · ${DIFF_LABELS[diff]}</p>
-      <div class="res-score">${score}</div>
-      <div class="res-stats">
-        комбо x${maxCombo} · блоки ${collected}/${blocksTotal}
-        ${prev && !isRecord ? `<br>рекорд ★ ${prev.score}` : ''}
-        ${prev && isRecord ? `<br>прошлый ★ ${prev.score}` : ''}
-      </div>
-      <div>
-        <button id="again">ЕЩЁ РАЗ</button>
-        <button id="tomenu" class="small">В МЕНЮ</button>
-      </div>
-    </div>
+    <div class="res-title ${isBest ? 'rec-glow' : ''}">${isBest ? 'РЕКОРД!' : 'ФИНИШ'}</div>
+    <div class="res-score">${score}</div>
+    ${delta}
+    <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal} · ${song.genre}</div>
+    <div class="res-next">следующий трек через <span id="cnt">${left}</span></div>
+    <div><button id="res-replay" class="small">ЕЩЁ РАЗ (R)</button></div>
+    <div class="res-hint">клик или пробел — сразу дальше · Esc — меню</div>
   `;
   app.appendChild(results);
-  results.querySelector('#again')!.addEventListener('click', () => {
-    replayRequested = true;
-    void startRide();
+  const cnt = results.querySelector<HTMLSpanElement>('#cnt')!;
+  results.querySelector('#res-replay')!.addEventListener('click', (e) => {
+    e.stopPropagation();
+    replay();
   });
-  results.querySelector('#tomenu')!.addEventListener('click', backToMenu);
+  results.addEventListener('click', () => void startNext());
+  countdownTimer = window.setInterval(() => {
+    if (document.hidden || game?.paused) return; // фоновая вкладка не листает треки
+    left--;
+    if (left <= 0) void startNext();
+    else cnt.textContent = String(left);
+  }, 1000);
+}
+
+function clearResults() {
+  clearInterval(countdownTimer);
+  results?.remove();
+  results = null;
+}
+
+async function startNext() {
+  if (!results) return; // защита от двойного срабатывания (клик + пробел)
+  clearResults();
+  teardownRide();
+  await startRide();
+}
+
+/** Мгновенный рестарт текущего трека — из заезда или с результатов. */
+function replay() {
+  if (!game && !results) return;
+  replayRequested = true;
+  clearResults();
+  teardownRide();
+  void startRide();
 }
 
 function backToMenu() {
   teardownRide();
-  results?.remove();
-  results = null;
+  clearResults();
   renderTracks();
   menu.style.display = '';
 }
@@ -235,10 +296,18 @@ addEventListener('keydown', (e) => {
     else if (game && game.paused) backToMenu();
     else if (game) pauseGame();
   }
-  if (e.code === 'Space' && game) {
-    e.preventDefault(); // чтобы пробел не «нажимал» сфокусированную кнопку
-    if (game.paused) resumeGame();
-    else pauseGame();
+  if (e.code === 'KeyR') replay(); // мгновенный рестарт — без меню и подтверждений
+  if (e.code === 'Space') {
+    if (results) {
+      e.preventDefault();
+      void startNext(); // пробел на результатах — сразу следующий трек
+      return;
+    }
+    if (game) {
+      e.preventDefault(); // чтобы пробел не «нажимал» сфокусированную кнопку
+      if (game.paused) resumeGame();
+      else pauseGame();
+    }
   }
 });
 
