@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2107</title>
+    <style>
+      :root {
+        --sodium: #ffa54d;
+        --concrete: #8a8d94;
+        --bg: #14151a;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; background: var(--bg); color: #c9ccd2;
+        font-family: "Courier New", monospace; overflow: hidden; }
+      #app { height: 100%; }
+      #app > canvas { display: block; }
+      .menu {
+        position: absolute; inset: 0; z-index: 10;
+        display: flex; align-items: center; justify-content: center;
+        background: linear-gradient(#101117, #1a1c24);
+      }
+      .panel {
+        border: 1px solid var(--concrete);
+        box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+        background: rgba(20, 21, 27, 0.92);
+        padding: 2rem 2.5rem; text-align: center; max-width: 34rem;
+      }
+      h1 { color: var(--sodium); text-shadow: 0 0 14px rgba(255, 165, 77, 0.5);
+        letter-spacing: 0.45em; font-size: 2.4rem; }
+      .sub { color: var(--concrete); font-size: 0.8rem; margin-top: 0.3rem; letter-spacing: 0.15em; }
+      button {
+        margin: 1.2rem 0.4rem 0; padding: 0.7rem 1.6rem; font: inherit; letter-spacing: 0.15em;
+        background: transparent; color: var(--sodium);
+        border: 1px solid var(--sodium); cursor: pointer;
+        text-shadow: 0 0 8px rgba(255, 165, 77, 0.6);
+      }
+      button:hover { background: rgba(255, 165, 77, 0.12); }
+      .track-info { margin-top: 1.4rem; min-height: 4.4rem; }
+      .track-title { color: #fff; font-size: 1.1rem; }
+      .track-meta { margin-top: 0.4rem; color: var(--concrete); font-size: 0.85rem; }
+      .track-code { margin-top: 0.3rem; color: #7da37d; font-size: 0.8rem; letter-spacing: 0.1em; }
+      .hint { margin-top: 1.3rem; color: #565963; font-size: 0.72rem; letter-spacing: 0.1em; }
+      .hud {
+        position: absolute; top: 1rem; left: 1.2rem; z-index: 5;
+        color: #c9ccd2; font-size: 0.9rem; letter-spacing: 0.12em;
+        text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
