@@ -203,6 +203,24 @@ export class Blocks {
     return this.defs.length;
   }
 
+  /** Полосы, занятые блоками в окрестности дистанции — для честных преград. */
+  lanesNear(dist: number, span: number): Set<number> {
+    const lanes = new Set<number>();
+    // defs отсортированы по dist — бинарный поиск левой границы
+    let lo = 0, hi = this.defs.length;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (this.defs[mid].dist < dist - span) lo = mid;
+      else hi = mid;
+    }
+    for (let i = lo; i < this.defs.length; i++) {
+      const b = this.defs[i];
+      if (b.dist > dist + span) break;
+      if (b.dist >= dist - span) lanes.add(b.lane);
+    }
+    return lanes;
+  }
+
   /**
    * Магнит, сбор, пропуск и анимация ближних блоков.
    * onCollect(блок) — очки/эффекты; onMiss() — для счётчика промахов.

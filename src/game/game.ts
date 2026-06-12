@@ -9,6 +9,7 @@ import { buildCar } from './car';
 import { Blocks, LANE_COLORS, LANE_CSS, type Difficulty } from './blocks';
 import { makeGate } from './gate';
 import { Particles } from './particles';
+import { Traffic } from './traffic';
 import { Sfx } from './sfx';
 import type { Level } from './level';
 import type { Song } from 'midi-gen/core';
@@ -22,9 +23,11 @@ export class Game {
   private world: World;
   private car = buildCar();
   private blocks: Blocks;
+  private traffic: Traffic;
+  private invulnUntil = -1; // после удара — 1.5 с неуязвимости
   private particles = new Particles();
   private shake = 0;
-  private sfx = new Sfx();
+  readonly sfx = new Sfx();
   private hud: HTMLDivElement;
   private fx: HTMLDivElement;
   private feverEdge: HTMLDivElement;
@@ -39,6 +42,12 @@ export class Game {
   private missLimit: number;
   private fever = false;
   private magnetUntil = -1; // время музыки, до которого активен магнит
+  // финиш: камера остаётся у ворот, машина катится по инерции и плавно тормозит
+  private finished = false;
+  private coastV = 0;
+  private coastDist = 0;
+  private finishNotified = false;
+  onFinish?: () => void;
   get blocksTotal() { return this.blocks.total; }
   private mouseX = 0; // -1..1
   private carX = 0;
@@ -60,7 +69,8 @@ export class Game {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.world = new World((z) => level.heightAt(-z), (z) => level.curveAt(-z));
     this.blocks = new Blocks(song, level, diff);
-    this.world.scene.add(this.blocks.mesh, this.particles.points);
+    this.traffic = new Traffic(level, this.blocks, diff);
+    this.world.scene.add(this.blocks.mesh, this.particles.points, this.traffic.root);
 
     // ворота старта и финиша поперёк дороги
     for (const [label, color, css, d] of [
@@ -204,7 +214,29 @@ export class Game {
       } else this.tEst += err * Math.min(1, dt * 4); // иначе мягкая коррекция
     }
     const t = Math.max(0, this.tEst + this.audioOffset);
-    const dist = this.level.distAt(t);
+
+    // конец трека → фаза наката: своя интеграция вместо distAt
+    if (!this.finished && t >= this.level.durationSec - 0.03) {
+      this.finished = true;
+      this.coastV = this.level.speedAt(this.level.durationSec - 0.2);
+      // тормозим — задние фонари ярче
+      const tail = this.car.getObjectByName('taillight') as THREE.Mesh | null;
+      if (tail) (tail.material as THREE.MeshStandardMaterial).emissiveIntensity = 5;
+    }
+    let dist: number;
+    if (this.finished && !this.paused) {
+      this.coastDist += this.coastV * dt;
+      this.coastV *= Math.exp(-1.1 * dt); // плавное торможение
+      dist = this.level.totalDist + this.coastDist;
+      if (this.coastV < 0.8 && !this.finishNotified) {
+        this.finishNotified = true;
+        this.onFinish?.();
+      }
+    } else if (this.finished) {
+      dist = this.level.totalDist + this.coastDist;
+    } else {
+      dist = this.level.distAt(t);
+    }
 
     // руление мышью с плавным догоном и креном
     // быстрый догон курсора (ритм-игра), вес — в крене и довороте носа
@@ -232,7 +264,17 @@ export class Game {
     const shX = (Math.random() - 0.5) * this.shake * 0.3;
     const shY = (Math.random() - 0.5) * this.shake * 0.22;
 
-    if (this.firstPerson) {
+    if (this.finished) {
+      // камера остаётся у финишных ворот и провожает машину взглядом
+      const fd = this.level.totalDist;
+      const camPos = new THREE.Vector3(
+        this.level.curveAt(fd - 8) * 0.7 + this.level.curveAt(fd) * 0.3,
+        this.level.heightAt(fd - 8) + 4.0,
+        -(fd - 8.5),
+      );
+      this.camera.position.lerp(camPos, 1 - Math.exp(-3 * dt));
+      this.camera.lookAt(cx + this.carX, y + 0.8, -dist);
+    } else if (this.firstPerson) {
       // вид водителя: камера у лобового, чуть перед стеклом (стекло непрозрачное)
       this.camera.position.set(cx + this.carX + shX * 0.5, y + 1.16 + shY * 0.5, -dist - 0.95);
       const look = 22;
@@ -308,6 +350,23 @@ export class Game {
       },
     );
 
+    // трафик: столкновение = сброс комбо и штраф, но не смерть
+    const hitObs = this.traffic.update(t, this.level, dist, cx + this.carX);
+    if (hitObs && t > this.invulnUntil) {
+      this.invulnUntil = t + 1.5;
+      this.combo = 0;
+      this.missStreak = 0;
+      if (this.fever) {
+        this.fever = false;
+        this.feverEdge.classList.remove('on');
+      }
+      this.score = Math.max(0, this.score - 50);
+      this.sfx.crash();
+      this.pop('💥', 'pop-combo pop-crash');
+      this.flash('#ff4433');
+      this.shake = 0.8;
+    }
+
     // микроцель: полоска до следующей вехи комбо
     const milestones = [0, 5, 10, 15, 20, 30, 50];
     let lo = 0, hi = 5;
@@ -342,6 +401,7 @@ export class Game {
     document.removeEventListener('pointerlockchange', this.onLockChange);
     if (this.pointerLocked) document.exitPointerLock();
     this.blocks.dispose();
+    this.traffic.dispose();
     this.particles.dispose();
     this.sfx.dispose();
     this.world.dispose();

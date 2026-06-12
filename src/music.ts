@@ -5,8 +5,16 @@ export type GameGenre = Extract<GenreId, 'grimerun' | 'outrun' | 'eurobeat'>;
 export const GENRES: GameGenre[] = ['grimerun', 'outrun', 'eurobeat'];
 
 export function newSong(genre: GameGenre): Song {
-  const minutes = 3 + Math.floor(Math.random() * 3); // 3–5 минут
-  return generate({ genre, minutes });
+  // без minutes — естественная форма жанра (~40–65 с);
+  // отбор сидов держит верхнюю границу у минуты
+  let best: Song | null = null;
+  for (let i = 0; i < 8; i++) {
+    const s = generate({ genre });
+    const sec = songDurationSec(s);
+    if (sec <= 63) return s;
+    if (!best || sec < songDurationSec(best)) best = s;
+  }
+  return best!;
 }
 
 export function songDurationSec(song: Song): number {

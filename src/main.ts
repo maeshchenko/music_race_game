@@ -10,6 +10,12 @@ import { Game } from './game/game';
 import { buildLevel } from './game/level';
 import type { Difficulty } from './game/blocks';
 
+/**
+ * SIMPLE_MENU: единственный экран «Мижган представляет» — случайный outrun,
+ * сложность хард. false — старое меню (4 трека, сложность, калибровка).
+ */
+const SIMPLE_MENU = true;
+
 const DIFF_LABELS: Record<Difficulty, string> = {
   light: 'ЛАЙТ', norm: 'НОРМ', hard: 'ХАРД',
 };
@@ -17,7 +23,16 @@ const DIFF_LABELS: Record<Difficulty, string> = {
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const menu = document.createElement('div');
 menu.className = 'menu';
-menu.innerHTML = `
+menu.innerHTML = SIMPLE_MENU
+  ? `
+  <div class="simple-panel">
+    <p class="presents">МИЖГАН ПРЕДСТАВЛЯЕТ ИГРУ</p>
+    <div class="title-3d">2107</div>
+    <button id="start" class="play-btn">ИГРАТЬ</button>
+    <p class="hint">управление — мышью · C — вид из салона · пробел — пауза</p>
+  </div>
+`
+  : `
   <div class="panel">
     <h1>2107</h1>
     <p class="sub">ритм-гонка · провинция · вечер</p>
@@ -33,36 +48,53 @@ menu.innerHTML = `
       <button id="regen" class="small">ДРУГИЕ ТРЕКИ</button>
       <button id="start">ПОЕХАЛИ</button>
     </div>
-    <p class="hint">мышь — руль · C — вид из салона · Esc — выход в меню</p>
+    <p class="hint">мышь — руль · C — вид из салона · пробел — пауза · Esc — меню</p>
   </div>
 `;
 app.appendChild(menu);
 
-const tracksEl = menu.querySelector<HTMLDivElement>('#tracks')!;
-const diffsEl = menu.querySelector<HTMLDivElement>('#diffs')!;
+const tracksEl = menu.querySelector<HTMLDivElement>('#tracks');
+const diffsEl = menu.querySelector<HTMLDivElement>('#diffs');
 
 let tracks: Song[] = [];
 let sel = 0;
-let diff: Difficulty = 'norm';
+let diff: Difficulty = SIMPLE_MENU ? 'hard' : 'norm';
 let player: Player | null = null;
 let game: Game | null = null;
 let results: HTMLDivElement | null = null;
+let replayRequested = false; // «ЕЩЁ РАЗ» — не перегенерировать трек
+// --- громкость: музыка через мастер, эффекты — смещением в Sfx ----------
+const VOL_KEY = 'race2107:vol';
+let vol = { music: 55, sfx: 70 };
+try { vol = { ...vol, ...JSON.parse(localStorage.getItem(VOL_KEY) ?? '{}') }; } catch { /* дефолт */ }
+
+const dbOf = (v: number) => (v <= 0 ? -80 : -36 + (v / 100) * 36);
+
+function applyVolumes() {
+  Tone.getDestination().volume.value = dbOf(vol.music);
+  game?.sfx.setOffset(dbOf(vol.sfx) - dbOf(vol.music));
+  localStorage.setItem(VOL_KEY, JSON.stringify(vol));
+}
+applyVolumes();
+
 // калибровка аудио-задержки: блоки раньше/позже звука, шаг 10 мс
 let audioOffsetMs = +(localStorage.getItem('race2107:audio-offset') ?? '0');
-const calVal = menu.querySelector<HTMLSpanElement>('#cal-val')!;
-function renderCal() {
-  calVal.textContent = `${audioOffsetMs > 0 ? '+' : ''}${audioOffsetMs} мс`;
-  localStorage.setItem('race2107:audio-offset', String(audioOffsetMs));
+if (!SIMPLE_MENU) {
+  const calVal = menu.querySelector<HTMLSpanElement>('#cal-val')!;
+  const renderCal = () => {
+    calVal.textContent = `${audioOffsetMs > 0 ? '+' : ''}${audioOffsetMs} мс`;
+    localStorage.setItem('race2107:audio-offset', String(audioOffsetMs));
+  };
+  menu.querySelector('#cal-minus')!.addEventListener('click', () => {
+    audioOffsetMs = Math.max(-200, audioOffsetMs - 10);
+    renderCal();
+  });
+  menu.querySelector('#cal-plus')!.addEventListener('click', () => {
+    audioOffsetMs = Math.min(200, audioOffsetMs + 10);
+    renderCal();
+  });
+  renderCal();
 }
-menu.querySelector('#cal-minus')!.addEventListener('click', () => {
-  audioOffsetMs = Math.max(-200, audioOffsetMs - 10);
-  renderCal();
-});
-menu.querySelector('#cal-plus')!.addEventListener('click', () => {
-  audioOffsetMs = Math.min(200, audioOffsetMs + 10);
-  renderCal();
-});
-renderCal();
 
 // --- рекорды ---------------------------------------------------------------
 
@@ -86,6 +118,7 @@ function genTracks() {
 }
 
 function renderTracks() {
+  if (!tracksEl) return;
   tracksEl.innerHTML = '';
   tracks.forEach((s, i) => {
     const rec = loadRec(s.code, diff);
@@ -102,6 +135,7 @@ function renderTracks() {
 }
 
 function renderDiffs() {
+  if (!diffsEl) return;
   diffsEl.innerHTML = '';
   (Object.keys(DIFF_LABELS) as Difficulty[]).forEach((d) => {
     const b = document.createElement('button');
@@ -118,11 +152,16 @@ async function startRide() {
   results?.remove();
   results = null;
   menu.style.display = 'none';
+  // простой флоу: каждый заезд — свежий случайный outrun
+  if (SIMPLE_MENU && !replayRequested) tracks = [newSong('outrun')], sel = 0;
+  replayRequested = false;
   const song = tracks[sel];
   player = createPlayer(song, { loop: false });
-  player.onEnded = showResults;
   game = new Game(app, song, buildLevel(song), player, diff, audioOffsetMs / 1000);
+  // результаты — после финишного наката (машина докатилась), не по концу музыки
+  game.onFinish = showResults;
   game.start();
+  applyVolumes(); // смещение эффектов — на свежесозданный Sfx
   await player.play();
   Object.assign(window as never, { __player: player, __game: game }); // отладка
 }
@@ -165,7 +204,10 @@ function showResults() {
     </div>
   `;
   app.appendChild(results);
-  results.querySelector('#again')!.addEventListener('click', () => void startRide());
+  results.querySelector('#again')!.addEventListener('click', () => {
+    replayRequested = true;
+    void startRide();
+  });
   results.querySelector('#tomenu')!.addEventListener('click', backToMenu);
 }
 
@@ -177,10 +219,15 @@ function backToMenu() {
   menu.style.display = '';
 }
 
-menu.querySelector('#regen')!.addEventListener('click', genTracks);
+menu.querySelector('#regen')?.addEventListener('click', genTracks);
 menu.querySelector('#start')!.addEventListener('click', () => void startRide());
 addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (game || results)) backToMenu();
+  if (e.code === 'Space' && game) {
+    e.preventDefault(); // чтобы пробел не «нажимал» сфокусированную кнопку
+    if (game.paused) resumeGame();
+    else pauseGame();
+  }
 });
 
 // --- пауза при потере фокуса -------------------------------------------
@@ -195,8 +242,24 @@ function pauseGame() {
   pauseOverlay = document.createElement('div');
   pauseOverlay.className = 'menu';
   pauseOverlay.innerHTML = `<div class="panel"><h1>ПАУЗА</h1>
-    <p class="sub">клик — продолжить · Esc — в меню</p></div>`;
-  pauseOverlay.addEventListener('click', resumeGame);
+    <div class="vol-row"><span>музыка</span>
+      <input type="range" id="vol-music" min="0" max="100" value="${vol.music}"></div>
+    <div class="vol-row"><span>эффекты</span>
+      <input type="range" id="vol-sfx" min="0" max="100" value="${vol.sfx}"></div>
+    <p class="sub">клик или пробел — продолжить · Esc — в меню</p></div>`;
+  pauseOverlay.addEventListener('click', (e) => {
+    // клики по ползункам не снимают паузу
+    if ((e.target as HTMLElement).closest('.vol-row')) return;
+    resumeGame();
+  });
+  pauseOverlay.querySelector<HTMLInputElement>('#vol-music')!.addEventListener('input', (e) => {
+    vol.music = +(e.target as HTMLInputElement).value;
+    applyVolumes();
+  });
+  pauseOverlay.querySelector<HTMLInputElement>('#vol-sfx')!.addEventListener('input', (e) => {
+    vol.sfx = +(e.target as HTMLInputElement).value;
+    applyVolumes();
+  });
   app.appendChild(pauseOverlay);
 }
 
@@ -214,5 +277,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) pauseGame();
 });
 
-genTracks();
-renderDiffs();
+if (!SIMPLE_MENU) {
+  genTracks();
+  renderDiffs();
+}

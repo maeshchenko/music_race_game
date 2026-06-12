@@ -11,6 +11,16 @@ export class Sfx {
   private lastAt = 0;
   private thud: Tone.Synth;
 
+  /**
+   * Смещение громкости эффектов в дБ поверх базовой. Музыка управляется
+   * мастером (Tone.Destination), эффекты компенсируются этим смещением,
+   * чтобы ползунки были независимы.
+   */
+  setOffset(db: number) {
+    for (const s of this.pool) s.volume.value = -14 + db;
+    this.thud.volume.value = -20 + db;
+  }
+
   constructor() {
     for (let i = 0; i < 4; i++)
       this.pool.push(new Tone.Synth({
@@ -47,6 +57,12 @@ export class Sfx {
 
   miss() {
     this.thud.triggerAttackRelease(110, 0.07);
+  }
+
+  /** Удар о преграду: низкий глухой бум. */
+  crash() {
+    this.thud.triggerAttackRelease(48, 0.3);
+    this.thud.triggerAttackRelease(65, 0.18, Tone.now() + 0.05);
   }
 
   dispose() {

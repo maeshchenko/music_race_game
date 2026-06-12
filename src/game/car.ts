@@ -5,8 +5,8 @@ import * as THREE from 'three';
  * хром-бамперы, прямоугольная решётка и фары. ~4.1 × 1.6 м.
  * lightsOn: false — припаркованная (фары и фонари потушены, без прожектора).
  */
-export function buildCar(opts: { color?: number; lightsOn?: boolean } = {}): THREE.Group {
-  const { color = 0x6b1220, lightsOn = true } = opts;
+export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: boolean } = {}): THREE.Group {
+  const { color = 0x6b1220, lightsOn = true, beam = lightsOn } = opts;
   const car = new THREE.Group();
 
   const cherry = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.35 });
@@ -45,8 +45,8 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean } = {}): THR
   // фары и задние фонари
   add(new THREE.BoxGeometry(0.34, 0.16, 0.05), headlight, -0.55, 0.62, -2.06);
   add(new THREE.BoxGeometry(0.34, 0.16, 0.05), headlight, 0.55, 0.62, -2.06);
-  add(new THREE.BoxGeometry(0.4, 0.14, 0.05), taillight, -0.52, 0.6, 2.06);
-  add(new THREE.BoxGeometry(0.4, 0.14, 0.05), taillight, 0.52, 0.6, 2.06);
+  add(new THREE.BoxGeometry(0.4, 0.14, 0.05), taillight, -0.52, 0.6, 2.06).name = 'taillight';
+  add(new THREE.BoxGeometry(0.4, 0.14, 0.05), taillight, 0.52, 0.6, 2.06).name = 'taillight';
 
   // колёса
   const wheelGeo = new THREE.CylinderGeometry(0.31, 0.31, 0.2, 14);
@@ -54,12 +54,13 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean } = {}): THR
   for (const [wx, wz] of [[-0.78, -1.32], [0.78, -1.32], [-0.78, 1.32], [0.78, 1.32]])
     add(wheelGeo, rubber, wx, 0.31, wz);
 
-  if (lightsOn) {
-    // свет фар — тёплое пятно перед машиной
-    const beam = new THREE.SpotLight(0xffe5b0, 60, 30, 0.5, 0.6, 1.6);
-    beam.position.set(0, 0.7, -1.9);
-    beam.target.position.set(0, 0, -14);
-    car.add(beam, beam.target);
+  if (beam) {
+    // свет фар — тёплое пятно перед машиной (только у машины игрока:
+    // прожектор на каждую машину трафика дорог для рендера)
+    const spot = new THREE.SpotLight(0xffe5b0, 60, 30, 0.5, 0.6, 1.6);
+    spot.position.set(0, 0.7, -1.9);
+    spot.target.position.set(0, 0, -14);
+    car.add(spot, spot.target);
   }
 
   return car;

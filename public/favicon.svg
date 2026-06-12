@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdfeff"/>
+      <stop offset="0.45" stop-color="#aab3bf"/>
+      <stop offset="0.5" stop-color="#39404a"/>
+      <stop offset="0.58" stop-color="#cdd5df"/>
+      <stop offset="1" stop-color="#8d97a4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="12" fill="#14151a"/>
+  <!-- неон-кубик -->
+  <rect x="40" y="10" width="13" height="13" rx="2" fill="#ff44ff" opacity="0.9"
+        transform="rotate(18 46.5 16.5)"/>
+  <rect x="40" y="10" width="13" height="13" rx="2" fill="none" stroke="#ff9dff"
+        stroke-width="1.5" opacity="0.8" transform="rotate(18 46.5 16.5)"/>
+  <!-- шильдик 07 -->
+  <text x="32" y="50" font-family="Courier New, monospace" font-size="34"
+        font-weight="900" font-style="italic" text-anchor="middle"
+        fill="url(#chrome)">07</text>
+  <!-- натриевый отблеск дороги -->
+  <ellipse cx="32" cy="58" rx="22" ry="3.5" fill="#ffa54d" opacity="0.35"/>
+</svg>
