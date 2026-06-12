@@ -7,10 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "sync:midi-gen": "rm -rf vendor/midi-gen/dist && cp -r ../midi-gen/dist vendor/midi-gen/dist"
   },
   "dependencies": {
-    "midi-gen": "file:../midi-gen",
+    "midi-gen": "file:./vendor/midi-gen",
     "three": "^0.182.0",
     "tone": "^15.1.22"
   },

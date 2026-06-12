@@ -6,17 +6,17 @@
     <title>2107</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="description" content="Ритм-игра от Мижгана" />
-    <!-- og:image — относительный путь; при деплое замени на абсолютный URL -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content="2107" />
     <meta property="og:description" content="Ритм-игра от Мижгана" />
-    <meta property="og:image" content="/og.png" />
+    <meta property="og:url" content="https://maeshchenko.github.io/music_race_game/" />
+    <meta property="og:image" content="https://maeshchenko.github.io/music_race_game/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="2107" />
     <meta name="twitter:description" content="Ритм-игра от Мижгана" />
-    <meta name="twitter:image" content="/og.png" />
+    <meta name="twitter:image" content="https://maeshchenko.github.io/music_race_game/og.png" />
     <style>
       :root {
         --sodium: #ffa54d;
@@ -25,9 +25,11 @@
       }
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { height: 100%; background: var(--bg); color: #c9ccd2;
-        font-family: "Courier New", monospace; overflow: hidden; }
+        font-family: "Courier New", monospace; overflow: hidden;
+        overscroll-behavior: none; }
       #app { height: 100%; }
-      #app > canvas { display: block; cursor: none; }
+      #app > canvas { display: block; cursor: none; touch-action: none;
+        -webkit-user-select: none; user-select: none; }
       .fever-edge {
         position: absolute; inset: 0; z-index: 4; pointer-events: none;
         opacity: 0; transition: opacity 0.4s;

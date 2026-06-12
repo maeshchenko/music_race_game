@@ -1,0 +1,19 @@
+{
+  "name": "midi-gen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./audio": {
+      "types": "./dist/audio.d.ts",
+      "import": "./dist/audio.js"
+    }
+  },
+  "dependencies": {
+    "tone": "^15.1.22"
+  }
+}

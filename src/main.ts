@@ -238,6 +238,7 @@ let pauseOverlay: HTMLDivElement | null = null;
 function pauseGame() {
   if (!game || game.paused) return;
   game.paused = true;
+  game.releasePointer(); // курсор обратно — двигать ползунки
   Tone.getTransport().pause();
   pauseOverlay = document.createElement('div');
   pauseOverlay.className = 'menu';
@@ -280,4 +281,28 @@ document.addEventListener('visibilitychange', () => {
 if (!SIMPLE_MENU) {
   genTracks();
   renderDiffs();
+}
+
+// --- мобильный гейт: полноэкран + ландшафт перед меню --------------------
+if (matchMedia('(pointer: coarse)').matches && 'ontouchstart' in window) {
+  const gate = document.createElement('div');
+  gate.className = 'menu';
+  gate.style.zIndex = '100';
+  gate.innerHTML = `
+    <div class="panel">
+      <h1 style="font-size:1.6rem">2107</h1>
+      <p class="sub" style="margin-top:1rem">игра идёт в горизонтальном<br>полноэкранном режиме</p>
+      <button id="fs-ok">ОК</button>
+    </div>`;
+  app.appendChild(gate);
+  gate.querySelector('#fs-ok')!.addEventListener('click', async () => {
+    try {
+      await document.documentElement.requestFullscreen();
+      // лочится только в полноэкране; на iOS не поддерживается — молча мимо
+      await (screen.orientation as ScreenOrientation & {
+        lock?: (o: string) => Promise<void>;
+      }).lock?.('landscape');
+    } catch { /* best effort */ }
+    gate.remove();
+  });
 }

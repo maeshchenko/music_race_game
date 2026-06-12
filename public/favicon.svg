@@ -1,23 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- стиль постера: ночь и два габарита, ничего мелкого -->
   <defs>
-    <linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fdfeff"/>
-      <stop offset="0.45" stop-color="#aab3bf"/>
-      <stop offset="0.5" stop-color="#39404a"/>
-      <stop offset="0.58" stop-color="#cdd5df"/>
-      <stop offset="1" stop-color="#8d97a4"/>
-    </linearGradient>
+    <radialGradient id="night" cx="0.5" cy="0.42" r="0.8">
+      <stop offset="0" stop-color="#15161d"/>
+      <stop offset="1" stop-color="#07080b"/>
+    </radialGradient>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
   </defs>
-  <rect width="64" height="64" rx="12" fill="#14151a"/>
-  <!-- неон-кубик -->
-  <rect x="40" y="10" width="13" height="13" rx="2" fill="#ff44ff" opacity="0.9"
-        transform="rotate(18 46.5 16.5)"/>
-  <rect x="40" y="10" width="13" height="13" rx="2" fill="none" stroke="#ff9dff"
-        stroke-width="1.5" opacity="0.8" transform="rotate(18 46.5 16.5)"/>
-  <!-- шильдик 07 -->
-  <text x="32" y="50" font-family="Courier New, monospace" font-size="34"
-        font-weight="900" font-style="italic" text-anchor="middle"
-        fill="url(#chrome)">07</text>
-  <!-- натриевый отблеск дороги -->
-  <ellipse cx="32" cy="58" rx="22" ry="3.5" fill="#ffa54d" opacity="0.35"/>
+  <rect width="64" height="64" rx="12" fill="url(#night)"/>
+  <!-- свечение -->
+  <g filter="url(#glow)">
+    <rect x="8" y="26" width="20" height="12" rx="2.5" fill="#ff3a26" opacity="0.9"/>
+    <rect x="36" y="26" width="20" height="12" rx="2.5" fill="#ff3a26" opacity="0.9"/>
+  </g>
+  <!-- сами габариты -->
+  <rect x="8" y="26" width="20" height="12" rx="2.5" fill="#ff4530"/>
+  <rect x="36" y="26" width="20" height="12" rx="2.5" fill="#ff4530"/>
 </svg>

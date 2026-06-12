@@ -122,7 +122,16 @@ export class Game {
     addEventListener('keydown', this.onKey);
     document.addEventListener('pointerlockchange', this.onLockChange);
     this.renderer.domElement.addEventListener('click', this.grabPointer);
+    // палец = руль: абсолютная позиция по ширине экрана
+    this.renderer.domElement.addEventListener('touchstart', this.onTouch, { passive: false });
+    this.renderer.domElement.addEventListener('touchmove', this.onTouch, { passive: false });
   }
+
+  private onTouch = (e: TouchEvent) => {
+    e.preventDefault(); // без скролла и pull-to-refresh
+    const touch = e.touches[0];
+    if (touch) this.mouseX = (touch.clientX / innerWidth) * 2 - 1;
+  };
 
   /** Захват курсора: машина и есть курсор, мышь не улетает из окна. */
   grabPointer = () => {
@@ -135,6 +144,11 @@ export class Game {
   private onLockChange = () => {
     this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
   };
+
+  /** Отдать курсор (пауза: ползунки требуют мышь). */
+  releasePointer() {
+    if (this.pointerLocked) document.exitPointerLock();
+  }
 
   private onKey = (e: KeyboardEvent) => {
     if (e.code === 'KeyC') this.firstPerson = !this.firstPerson; // физ. клавиша — любая раскладка
@@ -399,6 +413,8 @@ export class Game {
     removeEventListener('resize', this.onResize);
     removeEventListener('keydown', this.onKey);
     document.removeEventListener('pointerlockchange', this.onLockChange);
+    this.renderer.domElement.removeEventListener('touchstart', this.onTouch);
+    this.renderer.domElement.removeEventListener('touchmove', this.onTouch);
     if (this.pointerLocked) document.exitPointerLock();
     this.blocks.dispose();
     this.traffic.dispose();

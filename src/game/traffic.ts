@@ -14,9 +14,9 @@ import type { Difficulty } from './blocks';
 const LANE_X = 2.7;
 
 const DIFF_INTERVAL: Record<Difficulty, [number, number]> = {
-  light: [13, 20],
-  norm: [8, 14],
-  hard: [5.5, 10],
+  light: [3.5, 5.5],
+  norm: [2.2, 3.8],
+  hard: [1.5, 2.8],
 };
 
 const VAZ_COLORS = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
