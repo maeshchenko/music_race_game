@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildCar } from './car';
 
 /**
  * Вечерняя провинция: дорога, панельки с тёплыми окнами, натриевые фонари,
@@ -131,6 +132,32 @@ export class World {
   private poleGeo = new THREE.CylinderGeometry(0.07, 0.1, 5.4, 6);
   private headGeo = new THREE.BoxGeometry(0.5, 0.16, 0.22);
   private coneGeo = new THREE.ConeGeometry(2.6, 4.8, 12, 1, true);
+  // зимний двор: ели, голые деревья, гаражи, киоски, остановки
+  private firGeo = new THREE.ConeGeometry(1.5, 3.6, 7);
+  private firMat = new THREE.MeshLambertMaterial({ color: 0x1d2b22 });
+  private firSnowGeo = new THREE.ConeGeometry(1.1, 1.6, 7);
+  private firSnowMat = new THREE.MeshLambertMaterial({ color: 0x77808c });
+  private trunkGeo = new THREE.CylinderGeometry(0.09, 0.14, 2.4, 5);
+  private trunkMat = new THREE.MeshLambertMaterial({ color: 0x2a2520 });
+  private crownGeo = new THREE.IcosahedronGeometry(1.1, 0);
+  private crownMat = new THREE.MeshLambertMaterial({ color: 0x191d1a });
+  private garageGeo = new THREE.BoxGeometry(3.4, 2.6, 6.2);
+  private garageMats = [0x4a4440, 0x3f4a44, 0x54504a, 0x44424c].map(
+    (c) => new THREE.MeshLambertMaterial({ color: c }),
+  );
+  private garageDoorGeo = new THREE.PlaneGeometry(2.6, 2.1);
+  private garageDoorMat = new THREE.MeshLambertMaterial({ color: 0x2e2c29 });
+  private kioskGeo = new THREE.BoxGeometry(2.6, 2.4, 2.2);
+  private kioskMat = new THREE.MeshLambertMaterial({ color: 0x42403a });
+  private kioskWinGeo = new THREE.PlaneGeometry(1.7, 0.9);
+  private kioskWinMat = new THREE.MeshStandardMaterial({
+    color: 0xffd9a0, emissive: 0xffc070, emissiveIntensity: 1.6,
+  });
+  private stopWallMat = new THREE.MeshLambertMaterial({ color: 0x3b3e44 });
+  private stopLightMat = new THREE.MeshStandardMaterial({
+    color: 0xdfe8ff, emissive: 0xbcd0ff, emissiveIntensity: 1.1,
+  });
+  private vazColors = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
   private sharedGeos: Set<THREE.BufferGeometry>;
   private pooled: THREE.SpotLight[] = [];
   private snow!: THREE.Points;
@@ -142,7 +169,11 @@ export class World {
     private hAt: HeightFn = () => 0,
     private cAt: CurveFn = () => 0,
   ) {
-    this.sharedGeos = new Set([this.boxGeo, this.poleGeo, this.headGeo, this.coneGeo]);
+    this.sharedGeos = new Set([
+      this.boxGeo, this.poleGeo, this.headGeo, this.coneGeo,
+      this.firGeo, this.firSnowGeo, this.trunkGeo, this.crownGeo,
+      this.garageGeo, this.garageDoorGeo, this.kioskGeo, this.kioskWinGeo,
+    ]);
 
     const fogColor = 0x252834;
     this.scene.fog = new THREE.Fog(fogColor, 25, 230);
@@ -285,6 +316,104 @@ export class World {
         );
         group.add(b);
         z -= w + 6 + Math.random() * 18;
+      }
+    }
+
+    // деревья вдоль тротуаров и во дворах: ели со снегом + голые
+    for (const s of [-1, 1]) {
+      let z = -Math.random() * 8;
+      while (z > -CHUNK_LEN) {
+        const x = s * (ROAD_W / 2 + 6 + Math.random() * 16) + this.cAt(chunkZ + z);
+        const h = this.hAt(chunkZ + z);
+        if (Math.random() < 0.55) {
+          const fir = new THREE.Mesh(this.firGeo, this.firMat);
+          fir.position.set(x, h + 1.8, z);
+          const cap = new THREE.Mesh(this.firSnowGeo, this.firSnowMat);
+          cap.position.set(x, h + 3.0, z);
+          group.add(fir, cap);
+        } else {
+          const trunk = new THREE.Mesh(this.trunkGeo, this.trunkMat);
+          trunk.position.set(x, h + 1.2, z);
+          const crown = new THREE.Mesh(this.crownGeo, this.crownMat);
+          crown.scale.set(1, 0.8 + Math.random() * 0.5, 1);
+          crown.position.set(x, h + 2.7, z);
+          group.add(trunk, crown);
+        }
+        z -= 9 + Math.random() * 16;
+      }
+    }
+
+    // ряд гаражей во дворе
+    if (Math.random() < 0.35) {
+      const s = Math.random() < 0.5 ? -1 : 1;
+      const z0 = -8 - Math.random() * 30;
+      const n = 3 + Math.floor(Math.random() * 4);
+      for (let g = 0; g < n; g++) {
+        const z = z0 - g * 3.6;
+        const x = s * (ROAD_W / 2 + 17 + Math.random() * 2) + this.cAt(chunkZ + z);
+        const box = new THREE.Mesh(
+          this.garageGeo, this.garageMats[Math.floor(Math.random() * this.garageMats.length)],
+        );
+        box.rotation.y = Math.PI / 2;
+        box.position.set(x, this.hAt(chunkZ + z) + 1.25, z);
+        const door = new THREE.Mesh(this.garageDoorGeo, this.garageDoorMat);
+        door.rotation.y = -s * Math.PI / 2;
+        door.position.set(x - s * 3.15, this.hAt(chunkZ + z) + 1.05, z);
+        group.add(box, door);
+      }
+    }
+
+    // киоск с тёплой витриной
+    if (Math.random() < 0.3) {
+      const s = Math.random() < 0.5 ? -1 : 1;
+      const z = -Math.random() * CHUNK_LEN;
+      const x = s * (ROAD_W / 2 + 7.5) + this.cAt(chunkZ + z);
+      const h = this.hAt(chunkZ + z);
+      const kiosk = new THREE.Mesh(this.kioskGeo, this.kioskMat);
+      kiosk.position.set(x, h + 1.2, z);
+      const win = new THREE.Mesh(this.kioskWinGeo, this.kioskWinMat);
+      win.rotation.y = -s * Math.PI / 2;
+      win.position.set(x - s * 1.31, h + 1.35, z);
+      group.add(kiosk, win);
+    }
+
+    // остановка: задняя стенка, крыша, лавка, холодная лампа
+    if (Math.random() < 0.3) {
+      const s = Math.random() < 0.5 ? -1 : 1;
+      const z = -10 - Math.random() * (CHUNK_LEN - 20);
+      const bx = s * (ROAD_W / 2 + 4.6) + this.cAt(chunkZ + z);
+      const h = this.hAt(chunkZ + z);
+      const stop = new THREE.Group();
+      const back = new THREE.Mesh(new THREE.BoxGeometry(4, 2.0, 0.14), this.stopWallMat);
+      back.position.set(0, 1.2, s * 0.7);
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.12, 1.8), this.stopWallMat);
+      roof.position.set(0, 2.25, 0);
+      const bench = new THREE.Mesh(new THREE.BoxGeometry(3, 0.09, 0.5), this.stopWallMat);
+      bench.position.set(0, 0.55, s * 0.45);
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.2), this.stopLightMat);
+      lamp.position.set(0, 2.16, 0);
+      stop.add(back, roof, bench, lamp);
+      stop.position.set(bx, h, z);
+      group.add(stop);
+    }
+
+    // припаркованные жигули у обочины, фары потушены
+    if (Math.random() < 0.55) {
+      const n = 1 + (Math.random() < 0.3 ? 1 : 0);
+      for (let p = 0; p < n; p++) {
+        const s = Math.random() < 0.5 ? -1 : 1;
+        const z = -Math.random() * CHUNK_LEN;
+        const parked = buildCar({
+          color: this.vazColors[Math.floor(Math.random() * this.vazColors.length)],
+          lightsOn: false,
+        });
+        parked.position.set(
+          s * (ROAD_W / 2 + 1.6) + this.cAt(chunkZ + z),
+          this.hAt(chunkZ + z),
+          z,
+        );
+        parked.rotation.y = (Math.random() < 0.85 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.06;
+        group.add(parked);
       }
     }
 

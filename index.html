@@ -14,7 +14,33 @@
       html, body { height: 100%; background: var(--bg); color: #c9ccd2;
         font-family: "Courier New", monospace; overflow: hidden; }
       #app { height: 100%; }
-      #app > canvas { display: block; }
+      #app > canvas { display: block; cursor: none; }
+      .fever-edge {
+        position: absolute; inset: 0; z-index: 4; pointer-events: none;
+        opacity: 0; transition: opacity 0.4s;
+      }
+      .fever-edge.on {
+        opacity: 1;
+        box-shadow:
+          inset 0 0 60px rgba(255, 70, 255, 0.45),
+          inset 0 0 140px rgba(40, 255, 230, 0.18);
+        animation: fever-pulse 0.5s ease-in-out infinite alternate;
+      }
+      @keyframes fever-pulse {
+        from { box-shadow: inset 0 0 50px rgba(255, 70, 255, 0.35), inset 0 0 120px rgba(40, 255, 230, 0.12); }
+        to { box-shadow: inset 0 0 90px rgba(255, 70, 255, 0.6), inset 0 0 180px rgba(40, 255, 230, 0.28); }
+      }
+      .combo-bar {
+        position: absolute; top: 2.4rem; left: 1.2rem; z-index: 5;
+        width: 180px; height: 4px; background: rgba(255, 255, 255, 0.12);
+        pointer-events: none;
+      }
+      .combo-bar > div {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, #22ffee, #ff44ff);
+        box-shadow: 0 0 8px rgba(255, 68, 255, 0.7);
+        transition: width 0.15s;
+      }
       .menu {
         position: absolute; inset: 0; z-index: 10;
         display: flex; align-items: center; justify-content: center;
@@ -36,16 +62,100 @@
         text-shadow: 0 0 8px rgba(255, 165, 77, 0.6);
       }
       button:hover { background: rgba(255, 165, 77, 0.12); }
-      .track-info { margin-top: 1.4rem; min-height: 4.4rem; }
-      .track-title { color: #fff; font-size: 1.1rem; }
-      .track-meta { margin-top: 0.4rem; color: var(--concrete); font-size: 0.85rem; }
-      .track-code { margin-top: 0.3rem; color: #7da37d; font-size: 0.8rem; letter-spacing: 0.1em; }
+      .tracks { margin-top: 1.3rem; }
+      .track-row {
+        display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+        padding: 0.5rem 0.8rem; margin: 0.35rem 0; cursor: pointer;
+        border: 1px solid #3a3d45; text-align: left;
+      }
+      .track-row:hover { border-color: #6a6d75; }
+      .track-row.sel {
+        border-color: var(--sodium);
+        background: rgba(255, 165, 77, 0.08);
+        box-shadow: 0 0 10px rgba(255, 165, 77, 0.25);
+      }
+      .t-title { color: #fff; font-size: 0.95rem; }
+      .t-meta { color: var(--concrete); font-size: 0.75rem; white-space: nowrap; }
+      .t-rec { color: #7da37d; margin-left: 0.5rem; }
+      .diff-row { display: flex; gap: 0.5rem; justify-content: center; margin-top: 1.1rem; }
+      .calib-row {
+        display: flex; gap: 0.6rem; justify-content: center; align-items: center;
+        margin-top: 0.9rem; color: var(--concrete); font-size: 0.75rem;
+      }
+      .calib-row #cal-val { min-width: 4.5rem; color: #c9ccd2; }
+      button.small { padding: 0.45rem 1rem; font-size: 0.78rem; margin: 0; }
+      button.small.sel { background: rgba(255, 165, 77, 0.2); }
+      .diff-row + div button#start { margin-top: 1.1rem; }
+      .res-score {
+        margin-top: 1.2rem; font-size: 3.2rem; color: #fff;
+        text-shadow: 0 0 18px var(--sodium);
+      }
+      .res-stats { margin-top: 0.6rem; color: var(--concrete); font-size: 0.9rem; line-height: 1.6; }
+      .rec-glow {
+        color: #4dffae !important;
+        text-shadow: 0 0 14px #0fa, 0 0 40px #0fa !important;
+        animation: pop-shake 0.4s ease-in-out;
+      }
       .hint { margin-top: 1.3rem; color: #565963; font-size: 0.72rem; letter-spacing: 0.1em; }
       .hud {
         position: absolute; top: 1rem; left: 1.2rem; z-index: 5;
         color: #c9ccd2; font-size: 0.9rem; letter-spacing: 0.12em;
         text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
         pointer-events: none;
+      }
+      .fx-layer {
+        position: absolute; inset: 0; z-index: 6;
+        pointer-events: none; overflow: hidden;
+      }
+      .pop {
+        position: absolute; bottom: 36%;
+        transform: translateX(-50%) rotate(var(--rot, 0deg));
+        font-weight: bold; white-space: nowrap;
+        animation: pop-fly 1.05s ease-out forwards;
+      }
+      .pop-pts {
+        color: #aef; font-size: 1.15rem;
+        text-shadow: 0 0 8px #2ff, 0 0 18px #2ff;
+      }
+      .pop-combo {
+        color: #ff5cff; font-size: 1.7rem; bottom: 42%;
+        text-shadow: 0 0 10px #f0f, 0 0 26px #f0f;
+        animation: pop-fly 1.05s ease-out forwards, pop-shake 0.35s ease-in-out;
+      }
+      .pop-super {
+        color: #4dffae; font-size: 2.3rem;
+        text-shadow: 0 0 12px #0fa, 0 0 30px #0fa, 0 0 60px #0fa;
+      }
+      .pop-mega {
+        color: #ffd24d; font-size: 3rem;
+        text-shadow: 0 0 14px #fa0, 0 0 36px #f50, 0 0 80px #f0f;
+      }
+      .pop-lost {
+        color: #8a8d94; font-size: 1.3rem;
+        text-shadow: 0 0 8px #000;
+      }
+      @keyframes pop-fly {
+        0% { opacity: 0; transform: translateX(-50%) rotate(var(--rot)) scale(0.3); }
+        18% { opacity: 1; transform: translateX(-50%) rotate(var(--rot)) scale(1.25); }
+        32% { transform: translateX(-50%) rotate(var(--rot)) scale(1); }
+        100% { opacity: 0; transform: translateX(-50%) rotate(var(--rot)) translateY(-110px) scale(0.95); }
+      }
+      .flash {
+        position: absolute; bottom: 24%; width: 240px; height: 240px;
+        transform: translateX(-50%);
+        animation: flash-pop 0.28s ease-out forwards;
+        pointer-events: none;
+      }
+      @keyframes flash-pop {
+        0% { opacity: 0; transform: translateX(-50%) scale(0.4); }
+        25% { opacity: 1; transform: translateX(-50%) scale(1); }
+        100% { opacity: 0; transform: translateX(-50%) scale(1.5); }
+      }
+      @keyframes pop-shake {
+        0%, 100% { margin-left: 0; }
+        25% { margin-left: -9px; }
+        50% { margin-left: 8px; }
+        75% { margin-left: -5px; }
       }
     </style>
   </head>

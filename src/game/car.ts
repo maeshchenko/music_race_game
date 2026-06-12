@@ -1,23 +1,24 @@
 import * as THREE from 'three';
 
 /**
- * Низкополигональная «семёрка» (ВАЗ-2107) из примитивов: вишнёвый кузов,
- * угловатая кабина, хром-бамперы, прямоугольная решётка и фары.
- * Размеры близки к реальным: ~4.1 × 1.6 м.
+ * Низкополигональная «семёрка» (ВАЗ-2107) из примитивов: угловатая кабина,
+ * хром-бамперы, прямоугольная решётка и фары. ~4.1 × 1.6 м.
+ * lightsOn: false — припаркованная (фары и фонари потушены, без прожектора).
  */
-export function buildCar(): THREE.Group {
+export function buildCar(opts: { color?: number; lightsOn?: boolean } = {}): THREE.Group {
+  const { color = 0x6b1220, lightsOn = true } = opts;
   const car = new THREE.Group();
 
-  const cherry = new THREE.MeshStandardMaterial({ color: 0x6b1220, roughness: 0.45, metalness: 0.35 });
+  const cherry = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.35 });
   const glass = new THREE.MeshStandardMaterial({ color: 0x0c1018, roughness: 0.15, metalness: 0.6 });
   const chrome = new THREE.MeshStandardMaterial({ color: 0xb9bec6, roughness: 0.25, metalness: 0.9 });
   const rubber = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.95 });
-  const headlight = new THREE.MeshStandardMaterial({
-    color: 0xfff2cc, emissive: 0xffe9b0, emissiveIntensity: 2.2,
-  });
-  const taillight = new THREE.MeshStandardMaterial({
-    color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.6,
-  });
+  const headlight = lightsOn
+    ? new THREE.MeshStandardMaterial({ color: 0xfff2cc, emissive: 0xffe9b0, emissiveIntensity: 2.2 })
+    : new THREE.MeshStandardMaterial({ color: 0x8d8c80, roughness: 0.3, metalness: 0.4 });
+  const taillight = lightsOn
+    ? new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.6 })
+    : new THREE.MeshStandardMaterial({ color: 0x4a1015, roughness: 0.4 });
 
   const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
     const m = new THREE.Mesh(geo, mat);
@@ -53,11 +54,13 @@ export function buildCar(): THREE.Group {
   for (const [wx, wz] of [[-0.78, -1.32], [0.78, -1.32], [-0.78, 1.32], [0.78, 1.32]])
     add(wheelGeo, rubber, wx, 0.31, wz);
 
-  // свет фар — тёплое пятно перед машиной
-  const beam = new THREE.SpotLight(0xffe5b0, 60, 30, 0.5, 0.6, 1.6);
-  beam.position.set(0, 0.7, -1.9);
-  beam.target.position.set(0, 0, -14);
-  car.add(beam, beam.target);
+  if (lightsOn) {
+    // свет фар — тёплое пятно перед машиной
+    const beam = new THREE.SpotLight(0xffe5b0, 60, 30, 0.5, 0.6, 1.6);
+    beam.position.set(0, 0.7, -1.9);
+    beam.target.position.set(0, 0, -14);
+    car.add(beam, beam.target);
+  }
 
   return car;
 }
