@@ -43,6 +43,8 @@ export interface BlockDef {
   x: number; // мировой x (ось дороги + полоса); магнит двигает
   y: number;
   vel: number;
+  /** MIDI-питч исходной ноты песни — на нём озвучивается сбор (часть музыки). */
+  pitch: number;
   /** Сколько нот склеено: множитель очков (кап 3) и размера. */
   count: number;
   /** Нота, бонус-пикап, золотой джекпот или мистери-«?». */
@@ -183,6 +185,7 @@ export class Blocks {
         x: level.curveAt(dist) + lane * LANE_X,
         y: level.heightAt(dist) + 0.75,
         vel: c.vel,
+        pitch: Math.round(c.pitch),
         count: Math.min(c.count, 3),
         kind: 'note',
         collected: false,
@@ -206,6 +209,7 @@ export class Blocks {
           x: level.curveAt(dist) + base.lane * LANE_X,
           y: level.heightAt(dist) + 0.85,
           vel: 100,
+          pitch: 60,
           count: 1,
           kind: 'magnet',
           power: POWERS[Math.floor(Math.random() * POWERS.length)],
@@ -227,6 +231,7 @@ export class Blocks {
           x: level.curveAt(dist) + base.lane * LANE_X,
           y: level.heightAt(dist) + 0.9,
           vel: 127,
+          pitch: 60,
           count: 1,
           kind,
           collected: false,

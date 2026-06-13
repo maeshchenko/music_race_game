@@ -262,17 +262,21 @@ function showResults() {
   game.releasePointer(); // курсор обратно — кликнуть кнопку оверлея
   if (isBest && best) game.celebrate(); // золотой салют у машины
 
-  // ноты: блоки + бонусы, lucky ×1.5, колесо решено заранее (анимация — декор)
-  const baseNotes = Math.round((collected + bonusNotes) * (luckyRun ? 1.5 : 1));
+  // ноты — конвертация очков заезда (прозрачный перерасчёт: score ÷ 30),
+  // плюс бонус за джекпоты/мистери; lucky ×1.5; колесо — множитель сверху.
+  // ЖЁСТКИЙ КАП за ран ниже цены самого дешёвого скина — даже лучшая гонка
+  // не покупает скин за раз (прогрессия за несколько заездов).
+  const MAX_PER_RUN = 800;
+  const baseNotes = Math.round((score / 30 + bonusNotes * 5) * (luckyRun ? 1.5 : 1));
   const wheelMult = rollWheel();
-  const earned = Math.round(baseNotes * wheelMult);
+  const earned = Math.min(MAX_PER_RUN, Math.round(baseNotes * wheelMult));
 
   // мета: начислить ноты+XP, проверить миссии, выдать капсулы за уровни
   const rs: RunStats = {
     blocks: collected, maxCombo, magnets: game.magnetsGot, mystery: game.mysteryGot,
     gold: game.goldGot, noCrashSec: Math.round(game.noCrashSec), score,
   };
-  const reward = applyRun(rs, baseNotes, wheelMult);
+  const reward = applyRun(rs, earned);
 
   // дельта до рекорда: близость, не провал — главный крючок «ещё раз»
   const delta = !best ? ''
@@ -310,6 +314,7 @@ function showResults() {
     <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal}
       ${game.perfects > 0 ? ` · ✨${game.perfects} PERFECT` : ''} · ${song.genre}
       ${luckyRun ? ' · 🔥 ×1.5' : ''}</div>
+    <div class="res-convert">${score} очков → ♪ ${baseNotes}${luckyRun ? ' · 🔥×1.5' : ''}</div>
     <div class="res-slot">
       <span class="slot-label">♪ ${baseNotes}</span>
       <span class="slot-window"><span class="slot-reel" id="reel"></span></span>
@@ -366,7 +371,8 @@ function showResults() {
       wheelTimer = window.setTimeout(() => {
         if (!results) return;
         slotBox.classList.add(wheelMult >= 2 ? 'slot-win' : 'slot-done');
-        wtotal.textContent = `= ${earned} · всего ♪ ${meta.notes}`;
+        const capped = Math.round(baseNotes * wheelMult) > earned;
+        wtotal.textContent = `= ${earned}${capped ? ' (макс)' : ''} · всего ♪ ${meta.notes}`;
         if (wheelMult >= 2) game?.sfx.jackpot();
       }, 150);
     }

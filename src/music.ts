@@ -23,6 +23,97 @@ export function songDurationSec(song: Song): number {
   return (song.durationTicks / song.ppq) * (60 / song.bpm);
 }
 
+// --- анализ MIDI: пер-такт фичи для построения трассы --------------------
+//
+// Музыка синтезируется из MIDI — у нас есть символический источник (ноты,
+// питчи, velocity, роли, секции). Это богаче FFT сырого звука. Считаем фичи
+// один раз; трасса (повороты, холмы, скорость) строится из них в level.ts.
+
+export interface SongFeatures {
+  bars: number;
+  barSec: number;
+  energy: number[]; // 0..1 — суммарная громкость такта (velocity)
+  bass: number[]; // 0..1 — громкость баса
+  melody: number[]; // 0..1 — средний питч ведущей мелодии (нормирован по треку)
+  density: number[]; // 0..1 — плотность мелодических нот
+  drums: number[]; // 0..1 — плотность ударных
+  /** Индекс секции для такта (по song.sections). */
+  sectionAt: (bar: number) => number;
+}
+
+const norm = (arr: number[]): number[] => {
+  const peak = Math.max(...arr, 1e-6);
+  return arr.map((v) => v / peak);
+};
+
+/** Сглаживание по соседним тактам (±r) — чтобы скорость/уклон не дёргались. */
+const smooth = (arr: number[], r = 1): number[] =>
+  arr.map((_, i) => {
+    let s = 0, c = 0;
+    for (let j = i - r; j <= i + r; j++) if (j >= 0 && j < arr.length) { s += arr[j]; c++; }
+    return s / c;
+  });
+
+export function analyzeSong(song: Song): SongFeatures {
+  const barTicks = (song.ppq * 4 * song.timeSig[0]) / song.timeSig[1];
+  const secPerTick = 60 / (song.ppq * song.bpm);
+  const barSec = barTicks * secPerTick;
+  const bars = Math.max(1, Math.ceil(song.durationTicks / barTicks));
+  const barOf = (start: number) => Math.min(bars - 1, Math.floor(start / barTicks));
+
+  const energyRaw = new Array<number>(bars).fill(0);
+  const bassRaw = new Array<number>(bars).fill(0);
+  const densityRaw = new Array<number>(bars).fill(0);
+  const drumsRaw = new Array<number>(bars).fill(0);
+  // мелодия: средний питч ведущей роли по такту
+  const MELODY_ROLES = ['lead', 'arp', 'counter', 'chords'] as const;
+  const leadRole = MELODY_ROLES.find((r) => song.tracks.some((t) => t.role === r));
+  const pitchSum = new Array<number>(bars).fill(0);
+  const pitchCnt = new Array<number>(bars).fill(0);
+  let pMin = 127, pMax = 0;
+
+  for (const tr of song.tracks) {
+    for (const n of tr.notes) {
+      const b = barOf(n.start);
+      energyRaw[b] += n.vel;
+      if (tr.role === 'drums') { drumsRaw[b]++; continue; }
+      densityRaw[b]++;
+      if (tr.role === 'bass') bassRaw[b] += n.vel;
+      if (tr.role === leadRole) {
+        pitchSum[b] += n.pitch; pitchCnt[b]++;
+        pMin = Math.min(pMin, n.pitch); pMax = Math.max(pMax, n.pitch);
+      }
+    }
+  }
+
+  // мелодия: нормируем питч по диапазону трека; пустые такты держат прошлый
+  const span = Math.max(1, pMax - pMin);
+  const melody = new Array<number>(bars).fill(0.5);
+  let last = 0.5;
+  for (let b = 0; b < bars; b++) {
+    if (pitchCnt[b] > 0) last = (pitchSum[b] / pitchCnt[b] - pMin) / span;
+    melody[b] = last;
+  }
+
+  // секции: для каждого такта — индекс перекрывающей секции
+  const secStart = song.sections.map((s) => s.startBar);
+  const sectionAt = (bar: number): number => {
+    let idx = 0;
+    for (let i = 0; i < secStart.length; i++) if (bar >= secStart[i]) idx = i;
+    return idx;
+  };
+
+  return {
+    bars, barSec,
+    energy: smooth(norm(energyRaw), 1), // сглажено — плавная скорость/холмы
+    bass: norm(bassRaw),
+    melody: smooth(melody, 1), // сглажено — повороты не дёргаются
+    density: norm(densityRaw),
+    drums: norm(drumsRaw),
+    sectionAt,
+  };
+}
+
 // --- stem-плеер: слои музыки открываются комбо-тиром --------------------
 //
 // Копия createPlayer из midi-gen/audio с одним отличием: дорожки разбиты

@@ -179,6 +179,19 @@ function buildGreenhouseGeo(): THREE.BufferGeometry {
   return geo;
 }
 
+// общие текстуры фар: одинаковы у всех машин (узор линзы не зависит от цвета
+// кузова). Раньше создавались на каждую машину (canvas+blur ×5 на инстанс →
+// заметный расход при ~15 машинах трафика). Теперь — один раз.
+const TAIL_TEX = taillightTexture();
+const HEAD_TEX_L = headlightTexture();
+const HEAD_TEX_R = (() => {
+  const t = HEAD_TEX_L.clone();
+  t.wrapS = THREE.RepeatWrapping; t.repeat.x = -1; t.offset.x = 1;
+  t.needsUpdate = true; return t;
+})();
+const TAIL_GLOW_TEX = tailGlowTexture();
+const HEAD_GLOW_TEX = headGlowTexture();
+
 const BODY_GEO = buildBodyGeo();
 const GREENHOUSE_GEO = buildGreenhouseGeo();
 const WHEEL_GEO = (() => {
@@ -216,26 +229,19 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
   const rubber = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.95 });
   // передняя фара: текстурная линза (белый свет + оранжевый поворотник).
   // правая — зеркальная копия (поворотник наружу с обеих сторон)
-  const headTexL = lightsOn ? headlightTexture() : null;
-  const headTexR = headTexL ? (() => {
-    const t = headTexL.clone();
-    t.wrapS = THREE.RepeatWrapping; t.repeat.x = -1; t.offset.x = 1;
-    t.needsUpdate = true; return t;
-  })() : null;
-  const headMat = (tex: THREE.CanvasTexture | null) => lightsOn
+  // материалы фар — per-instance (Game меняет накал), текстуры — общие
+  const headMat = (tex: THREE.CanvasTexture) => lightsOn
     ? new THREE.MeshStandardMaterial({
         map: tex, emissiveMap: tex, emissive: 0xffffff,
         emissiveIntensity: 2.4, toneMapped: false,
       })
     : new THREE.MeshStandardMaterial({ color: 0x8d8c80, roughness: 0.3, metalness: 0.4 });
-  const headlightL = headMat(headTexL);
-  const headlightR = headMat(headTexR);
-  // задняя фара: текстурная линза ВАЗ-2107, светится узором. Тусклый ночной
-  // габарит по умолчанию (intensity ~0.9), Game поднимает при торможении.
-  const tailTex = lightsOn ? taillightTexture() : null;
+  const headlightL = headMat(HEAD_TEX_L);
+  const headlightR = headMat(HEAD_TEX_R);
+  // задняя фара: общая текстура-линза, материал per-instance (накал тормозов)
   const taillight = lightsOn
     ? new THREE.MeshStandardMaterial({
-        map: tailTex, emissiveMap: tailTex, emissive: 0xffffff,
+        map: TAIL_TEX, emissiveMap: TAIL_TEX, emissive: 0xffffff,
         emissiveIntensity: 0.9, toneMapped: false,
       })
     : new THREE.MeshStandardMaterial({ color: 0x4a1015, roughness: 0.4 });
@@ -264,10 +270,9 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
   // белый ореол передних фар — мягкое свечение «в тумане». depthTest:true,
   // чтобы у своей машины кузов прятал ореол сзади, а у встречных — виден
   if (lightsOn) {
-    const hg = headGlowTexture();
     for (const sx of [-0.56, 0.56]) {
       const spr = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: hg, color: 0xfff0e0, transparent: true, opacity: 0.3,
+        map: HEAD_GLOW_TEX, color: 0xfff0e0, transparent: true, opacity: 0.3,
         blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
       }));
       spr.position.set(sx, 0.6, -2.13);
@@ -281,10 +286,9 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
   // мягкий ореол свечения — фара «в тумане», аддитивно, ловится bloom.
   // depthTest:false — бампер на поворотах не протыкает ореол
   if (lightsOn) {
-    const glowTex = tailGlowTexture();
     for (const sx of [-0.6, 0.6]) {
       const spr = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: glowTex, color: 0xff4424, transparent: true, opacity: 0.34,
+        map: TAIL_GLOW_TEX, color: 0xff4424, transparent: true, opacity: 0.34,
         blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
         toneMapped: false,
       }));

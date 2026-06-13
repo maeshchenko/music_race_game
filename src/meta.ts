@@ -204,9 +204,8 @@ export interface RunReward {
   nextUnlock: { name: string; price: number; have: number } | null;
 }
 
-/** Итог заезда: начислить ноты+XP, проверить миссии. wheelMult — с колеса. */
-export function applyRun(rs: RunStats, baseNotes: number, wheelMult: number): RunReward {
-  const notesEarned = Math.round(baseNotes * wheelMult);
+/** Итог заезда: начислить ноты+XP, проверить миссии. notesEarned уже капнут. */
+export function applyRun(rs: RunStats, notesEarned: number): RunReward {
   state.notes += notesEarned;
   const levelUp = addXp(rs.blocks * 10 + rs.maxCombo * 5 + Math.round(rs.score / 50));
   const missions = checkMissions(rs);

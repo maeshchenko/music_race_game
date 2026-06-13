@@ -1,4 +1,5 @@
 import type { Song } from 'midi-gen/core';
+import { analyzeSong } from '../music';
 
 /**
  * Уровень: трасса — сегментная (прямые, плавные и короткие повороты,
@@ -40,28 +41,14 @@ function lcg(seed: number): () => number {
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
 export function buildLevel(song: Song): Level {
-  const barTicks = (song.ppq * 4 * song.timeSig[0]) / song.timeSig[1];
   const secPerTick = 60 / (song.ppq * song.bpm);
-  const barSec = barTicks * secPerTick;
-  const bars = Math.max(1, Math.ceil(song.durationTicks / barTicks));
   const durationSec = song.durationTicks * secPerTick;
 
-  // энергия такта (сумма velocity) — музыкальная составляющая темпа
-  const loud = new Array<number>(bars).fill(0);
-  for (const tr of song.tracks)
-    for (const n of tr.notes) {
-      const b = Math.min(bars - 1, Math.floor(n.start / barTicks));
-      loud[b] += n.vel;
-    }
-  const peak = Math.max(...loud, 1);
-  const energy = loud.map((_, i) => {
-    let s = 0, c = 0;
-    for (let j = i - 1; j <= i + 1; j++)
-      if (j >= 0 && j < bars) { s += loud[j] / peak; c++; }
-    return s / c;
-  });
+  // музыкальные фичи: повороты ← мелодия, холмы ← энергия, темп ← энергия
+  const feat = analyzeSong(song);
+  const { barSec, bars } = feat;
   const energyAt = (t: number) =>
-    energy[clamp(Math.floor(t / barSec), 0, bars - 1)];
+    feat.energy[clamp(Math.floor(t / barSec), 0, bars - 1)];
 
   // --- дорога: сегментные профили кривизны и уклона --------------------
 
@@ -72,19 +59,27 @@ export function buildLevel(song: Song): Level {
   const grd = new Float32Array(n); // уклон, м/м
   const rnd = lcg(Number(song.seed % 2147483646n));
 
-  // кривизна: прямая / длинный плавный / короткий поворот, плавные въезды
+  // дистанция → такт (по номинальной крейсерской скорости; точный тайминг
+  // даёт симуляция позже, но геометрия фич синхронится достаточно близко)
+  const barLenM = Math.max(40, vBase * barSec);
+  const barAtDist = (d: number) => clamp(Math.floor(d / barLenM), 0, bars - 1);
+
+  // кривизна: повороты на мелодических ходах, прямые где мелодия ровная.
+  // фраза ~1.5–2.5 такта; сила = 55% мелодия + 35% seed-джиттер (органично)
   {
-    let i = 0, psi = 0; // psi — текущий азимут, держим в пределах ±0.45
+    let i = 0, psi = 0; // psi — азимут, держим в пределах ±0.45
     while (i < n) {
-      const r = rnd();
-      let len: number, dpsi: number;
-      if (r < 0.32) { len = 160 + rnd() * 260; dpsi = 0; }            // прямая
-      else if (r < 0.7) { len = 240 + rnd() * 300; dpsi = 0.25 + rnd() * 0.3; } // долгий плавный
-      else { len = 90 + rnd() * 110; dpsi = 0.3 + rnd() * 0.25; }     // короткий, покруче
-      let sign = rnd() < 0.5 ? -1 : 1;
+      const phraseBars = 1.5 + rnd();
+      const len = clamp(phraseBars * barLenM, 120, 520);
+      const b0 = barAtDist(i * DS);
+      const b1 = clamp(b0 + Math.round(phraseBars), 0, bars - 1);
+      const dMel = feat.melody[b1] - feat.melody[b0]; // -1..1, ход мелодии
+      let mag = Math.abs(dMel) * 0.4 + rnd() * 0.22;   // мягче — меньше резких углов
+      let sign = dMel > 0.05 ? 1 : dMel < -0.05 ? -1 : (rnd() < 0.5 ? -1 : 1);
+      if (Math.abs(dMel) < 0.06 && rnd() < 0.6) mag = 0; // чаще прямые → ровнее ход
       if (psi > 0.22) sign = -1;
       else if (psi < -0.22) sign = 1;
-      dpsi = clamp(dpsi * sign, -0.45 - psi, 0.45 - psi);
+      const dpsi = clamp(mag * sign, -0.45 - psi, 0.45 - psi);
       const pts = Math.max(4, Math.round(len / DS));
       const ramp = Math.min(Math.round(50 / DS), pts >> 1);
       const kappa = dpsi / len;
@@ -96,15 +91,16 @@ export function buildLevel(song: Song): Level {
     }
   }
 
-  // уклон: ровно / затяжной подъём / затяжной спуск
+  // уклон: подъёмы в громкие секции, спуски в тихие (рост энергии → вверх).
   {
     let i = 0, hCur = 0;
     while (i < n) {
-      const r = rnd();
-      const len = 220 + rnd() * 420;
-      let g: number;
-      if (r < 0.3) g = 0;
-      else g = (0.022 + rnd() * 0.04) * (r < 0.65 ? 1 : -1);
+      const len = 220 + rnd() * 300;
+      const phraseBars = Math.max(1, Math.round(len / barLenM));
+      const b0 = barAtDist(i * DS);
+      const b1 = clamp(b0 + phraseBars, 0, bars - 1);
+      const dE = feat.energy[b1] - feat.energy[b0]; // -1..1, ход энергии
+      let g = clamp(dE * 0.09, -0.05, 0.05) + (rnd() - 0.5) * 0.012;
       if (hCur > 50) g = -Math.abs(g || 0.03);
       else if (hCur < -30) g = Math.abs(g || 0.03);
       const pts = Math.max(4, Math.round(len / DS));
@@ -140,11 +136,12 @@ export function buildLevel(song: Song): Level {
   // резкий — перед крутым поворотом скорость сбрасывается заранее сама
   // (лимит падает раньше, чем машина доезжает, за счёт плавных въездов).
 
+  const VMIN = 25; // нижний предел скорости, м/с (~90 км/ч) — не едем медленнее
   const steps = Math.ceil(durationSec / SIM_DT) + 2;
   const sArr = new Float32Array(steps);
   const vArr = new Float32Array(steps);
   {
-    let s = 0, v = vBase * 0.5;
+    let s = 0, v = Math.max(VMIN, vBase * 0.7);
     for (let k = 0; k < steps; k++) {
       sArr[k] = s;
       vArr[k] = v;
@@ -153,12 +150,13 @@ export function buildLevel(song: Song): Level {
       const iAhead = clamp(i + Math.round(35 / DS), 0, n - 1);
       const kHere = Math.max(Math.abs(kap[i]), Math.abs(kap[iAhead]));
       const g = grd[i];
-      let vLim = vBase * (0.7 + 0.5 * energyAt(k * SIM_DT));
+      // связь скорости с энергией мягче (0.85..1.1 вместо 0.7..1.2) — ровнее ход
+      let vLim = vBase * (0.85 + 0.25 * energyAt(k * SIM_DT));
       vLim = Math.min(vLim, Math.sqrt(A_LAT / Math.max(kHere, 1e-5)));
       vLim *= clamp(1 - g * 6, 0.55, 1.4); // в гору медленнее, с горы быстрее
       const kDyn = v > vLim ? 1.6 : 0.35; // тормоз злее разгона
       const a = clamp(kDyn * (vLim - v) - 9.8 * g, -8, 5);
-      v = Math.max(6, v + a * SIM_DT);
+      v = Math.max(VMIN, v + a * SIM_DT); // не ниже 90 км/ч
       s += v * SIM_DT;
     }
   }

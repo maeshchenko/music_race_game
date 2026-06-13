@@ -6,7 +6,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { Player } from 'midi-gen/audio';
 import { IS_MOBILE } from '../platform';
 import { World, THEMES, type WorldTheme } from './world';
-import { comboPhrase, recoveryPhrase } from './phrases';
+import { comboPhrase } from './phrases';
 import { buildCar } from './car';
 import {
   Blocks, LANE_COLORS, LANE_CSS, POWER_COLOR, POWER_CSS,
@@ -71,6 +71,8 @@ export class Game {
   private themeIndex = 0; // клавиша 0 перебирает темы оформления на лету
   private tailMat: THREE.MeshStandardMaterial | null = null;
   private tailGlows: THREE.Sprite[] = []; // ореолы свечения фар
+  private fpsEMA = 60; // сглаженный FPS для дебаг-лога (НЕ УДАЛЯТЬ — нужен до релиза)
+  private logAcc = 0; // аккумулятор для лога раз в секунду
   private prevSpeed = 0; // для определения торможения (яркость задней фары)
   // финиш: камера остаётся у ворот, машина катится по инерции и плавно тормозит
   private finished = false;
@@ -138,9 +140,11 @@ export class Game {
       gate.rotation.y = -Math.atan(dir);
       this.world.scene.add(gate);
     }
-    // телефон: без antialias/bloom, pixelRatio ниже — GPU и так впритык
+    // телефон: без antialias/bloom, pixelRatio ниже — GPU и так впритык.
+    // десктоп кап 1.5 (а не 2): на retina 2x = 4x пикселей под bloom — тяжело,
+    // и тяжёлый live-синтез конкурирует за CPU → запас спасает от заиканий звука
     this.renderer = new THREE.WebGLRenderer({ antialias: !IS_MOBILE });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE ? 1.5 : 2));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE ? 1.5 : 1.5));
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -395,10 +399,15 @@ export class Game {
       const reported = this.player.positionSec();
       this.tEst += dt;
       const err = reported - this.tEst;
-      if (Math.abs(err) > 0.3) {
-        this.tEst = reported; // большой расход — жёсткий ресинк
-        console.warn(`[clock] resync ${err.toFixed(3)}s @${reported.toFixed(1)}s`);
-      } else this.tEst += err * Math.min(1, dt * 4); // иначе мягкая коррекция
+      // огромный расход (>2с) = перезапуск/seek — только тогда жёсткий сброс.
+      // иначе ВСЕГДА плавный слью без телепорта: коррекция капается ±60% хода,
+      // чтобы заминка синтеза (резкий скачок позиции) не дёргала машину.
+      if (Math.abs(err) > 2) {
+        this.tEst = reported;
+      } else {
+        const maxCorr = 0.6 * dt; // не быстрее +60% / медленнее −40% реального
+        this.tEst += THREE.MathUtils.clamp(err * 0.5, -maxCorr, maxCorr);
+      }
     }
     const t = Math.max(0, this.tEst + this.audioOffset);
 
@@ -566,7 +575,6 @@ export class Game {
           this.scoreBump();
           return;
         }
-        const hadMiss = this.missStreak > 0;
         this.missStreak = 0;
         this.combo++;
         this.maxCombo = Math.max(this.maxCombo, this.combo);
@@ -596,7 +604,6 @@ export class Game {
         } else if (b.count > 1) {
           this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
         }
-        if (hadMiss && Math.random() < 0.4) this.pop(`${recoveryPhrase()}!`, 'pop-combo');
         this.syncFever();
       },
       () => {
@@ -697,6 +704,14 @@ export class Game {
     this.world.update(dt, this.car.position);
     if (this.composer) this.composer.render();
     else this.renderer.render(this.world.scene, this.camera);
+
+    // дебаг FPS + скорость раз в секунду (нужен до релиза — НЕ УДАЛЯТЬ)
+    if (dt > 0) this.fpsEMA += (1 / dt - this.fpsEMA) * 0.1;
+    this.logAcc += dt;
+    if (this.logAcc >= 1 && !this.finished && !this.paused) {
+      this.logAcc = 0;
+      console.log(`[perf] fps=${Math.round(this.fpsEMA)} speed=${kmh}км/ч t=${t.toFixed(1)}`);
+    }
   }
 
   dispose() {
