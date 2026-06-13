@@ -18,9 +18,10 @@ import {
 import { Game } from './game/game';
 import { buildLevel } from './game/level';
 import { pickTheme } from './game/world';
+import { GarageView } from './garage-view';
 import type { Difficulty } from './game/blocks';
 import {
-  meta, applyRun, openCapsule, buySkin, equipSkin, SKINS, RARITY,
+  meta, applyRun, openCapsule, buySkin, equipSkin, skinCount, SKINS, RARITY,
   type RunStats,
 } from './meta';
 
@@ -434,30 +435,73 @@ function refreshMenuMeta() {
 // --- гараж: скины за ноты + вскрытие капсул --------------------------------
 
 let garage: HTMLDivElement | null = null;
+let garageView: GarageView | null = null;
+
+function garageStageSize(): [number, number] {
+  const w = Math.min(innerWidth * 0.82, 640);
+  return [w, Math.round(w * 0.46)];
+}
 
 function openGarage() {
   stopMenuSnow();
   garage?.remove();
   garage = document.createElement('div');
   garage.className = 'menu garage-screen';
-  renderGarage();
+  // оболочка строится раз; 3D-витрина живёт всё время, не пересоздаётся
+  garage.innerHTML = `
+    <div class="panel garage-panel">
+      <h1>ГАРАЖ</h1>
+      <div class="garage-stage"></div>
+      <p class="sub" id="garage-stats"></p>
+      <div id="garage-cap"></div>
+      <div class="skins-grid" id="skins-grid"></div>
+      <button id="garage-back" class="small">НАЗАД</button>
+    </div>`;
   app.appendChild(garage);
+
+  const [gw, gh] = garageStageSize();
+  garageView = new GarageView(gw, gh, meta.skinColor);
+  garage.querySelector('.garage-stage')!.appendChild(garageView.canvas);
+
+  garage.querySelector('#garage-back')!.addEventListener('click', () => {
+    closeGarage();
+    refreshMenuMeta();
+    menu.style.display = '';
+    startMenuSnow();
+  });
+  renderGarage();
 }
 
 function closeGarage() {
+  garageView?.dispose();
+  garageView = null;
   garage?.remove();
   garage = null;
 }
 
+/** Обновляет только сетку скинов, статы и кнопку капсул (не трогает 3D). */
 function renderGarage() {
   if (!garage) return;
-  const skinCards = SKINS.map((s) => {
+  const stats = garage.querySelector<HTMLElement>('#garage-stats')!;
+  stats.textContent = `♪ ${meta.notes} · уровень ${meta.level} · заездов ${meta.totalRuns}`
+    + ` · блоков ${meta.totalBlocks} · лучшее комбо x${meta.bestCombo}`;
+
+  const capWrap = garage.querySelector<HTMLElement>('#garage-cap')!;
+  capWrap.innerHTML = meta.capsules > 0
+    ? `<button id="open-cap" class="play-btn cap-btn">🎁 ВСКРЫТЬ КАПСУЛУ (${meta.capsules})</button>`
+    : '';
+  capWrap.querySelector('#open-cap')?.addEventListener('click', runCapsule);
+
+  const grid = garage.querySelector<HTMLElement>('#skins-grid')!;
+  grid.innerHTML = SKINS.map((s) => {
     const owned = meta.owned.includes(s.id);
     const equipped = meta.skin === s.id;
     const canBuy = !owned && meta.notes >= s.price;
     const rc = RARITY[s.rarity].css;
+    const cnt = skinCount(s.id);
     return `<div class="skin-card${equipped ? ' equipped' : ''}${owned ? ' owned' : ''}"
         data-id="${s.id}" style="--rar:${rc}">
+      ${cnt > 1 ? `<span class="skin-count">x${cnt}</span>` : ''}
       <div class="skin-swatch" style="background:#${s.color.toString(16).padStart(6, '0')}"></div>
       <div class="skin-rarity" style="color:${rc}">${RARITY[s.rarity].label}</div>
       <div class="skin-name">${s.name}</div>
@@ -469,31 +513,14 @@ function renderGarage() {
       }</div>
     </div>`;
   }).join('');
-  garage.innerHTML = `
-    <div class="panel garage-panel">
-      <h1>ГАРАЖ</h1>
-      <p class="sub">♪ ${meta.notes} · уровень ${meta.level} · заездов ${meta.totalRuns}
-        · блоков ${meta.totalBlocks} · лучшее комбо x${meta.bestCombo}</p>
-      ${meta.capsules > 0
-        ? `<button id="open-cap" class="play-btn cap-btn">🎁 ВСКРЫТЬ КАПСУЛУ (${meta.capsules})</button>`
-        : ''}
-      <div class="skins-grid">${skinCards}</div>
-      <button id="garage-back" class="small">НАЗАД</button>
-    </div>`;
-  garage.querySelectorAll<HTMLElement>('.skin-card').forEach((card) => {
+  grid.querySelectorAll<HTMLElement>('.skin-card').forEach((card) => {
     card.addEventListener('click', () => {
       const id = card.dataset.id!;
       if (meta.owned.includes(id)) equipSkin(id);
-      else buySkin(id);
+      else if (!buySkin(id)) return; // не хватило нот — ничего
+      garageView?.setColor(meta.skinColor); // цвет применяется сразу
       renderGarage();
     });
-  });
-  garage.querySelector('#open-cap')?.addEventListener('click', runCapsule);
-  garage.querySelector('#garage-back')!.addEventListener('click', () => {
-    closeGarage();
-    refreshMenuMeta();
-    menu.style.display = '';
-    startMenuSnow();
   });
 }
 
@@ -517,9 +544,9 @@ function runCapsule() {
       ? `<div class="cap-rarity" style="color:${rar.css}">${rar.label}</div>
          <div class="cap-skin-name" style="color:${hex}">${res.skin.name}</div>
          <div class="cap-tag">НОВЫЙ СКИН!</div>`
-      : `<div class="cap-rarity" style="color:${rar.css}">${rar.label}</div>
+      : `<div class="cap-rarity" style="color:${rar.css}">${rar.label} · x${res.count}</div>
          <div class="cap-skin-name" style="color:${hex}">${res.skin.name}</div>
-         <div class="cap-tag cap-dupe">ДУБЛЬ → ♪ +${res.notes}</div>`;
+         <div class="cap-tag cap-dupe">ДУБЛЬ x${res.count} → ♪ +${res.notes}</div>`;
     fx.innerHTML = `<div class="capsule-result" style="border-color:${rar.css}">
       <div class="cap-swatch" style="background:${hex}"></div>${inner}</div>`;
     fx.addEventListener('click', () => { fx.remove(); renderGarage(); });

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildCar } from './car';
+import { buildCar, SHARED_CAR_GEOS } from './car';
 import type { Level } from './level';
 import type { Blocks } from './blocks';
 import type { Difficulty } from './blocks';
@@ -135,7 +135,9 @@ export class Traffic {
 
   dispose() {
     this.root.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && obj.geometry !== this.pileGeo) obj.geometry.dispose();
+      // общие геометрии машины делятся всеми инстансами — не диспозить
+      if (obj instanceof THREE.Mesh && obj.geometry !== this.pileGeo
+          && !SHARED_CAR_GEOS.has(obj.geometry)) obj.geometry.dispose();
     });
     this.pileGeo.dispose();
   }

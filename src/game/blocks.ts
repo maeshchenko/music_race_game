@@ -128,7 +128,7 @@ export class Blocks {
     const clusters: Cluster[] = [];
     for (const n of chosen) {
       const t = n.start * secPerTick;
-      if (t < 5 || t >= level.durationSec - 3) continue; // разгон и финиш без суеты
+      if (t < 5 || t >= level.durationSec - 1.2) continue; // разгон и короткий хвост у финиша
       const last = clusters[clusters.length - 1];
       if (last && t - last.t <= CLUSTER_SEC) {
         last.vel = Math.max(last.vel, n.vel);

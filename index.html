@@ -257,6 +257,13 @@
         box-shadow: 0 0 8px #ff44ff; }
       /* гараж */
       .garage-panel { max-width: 44rem; }
+      .garage-stage {
+        margin: 0.6rem auto 0.4rem; width: fit-content; line-height: 0;
+        border: 1px solid #2a2d35;
+        background: radial-gradient(ellipse at 50% 60%, #1c1e26 0%, #0c0d11 75%);
+        box-shadow: inset 0 0 40px rgba(0,0,0,0.7);
+      }
+      .garage-stage canvas { display: block; }
       .cap-btn { font-size: 1rem; padding: 0.7rem 2rem; margin-top: 1rem;
         animation: cap-glow 1.2s ease-in-out infinite alternate; }
       @keyframes cap-glow {
@@ -271,7 +278,13 @@
       .skin-card.owned { border-color: #5a6d5a; }
       .skin-card.equipped { border-color: var(--sodium);
         box-shadow: 0 0 12px rgba(255, 165, 77, 0.4); }
-      .skin-card { border-top: 2px solid var(--rar, #3a3d45); }
+      .skin-card { border-top: 2px solid var(--rar, #3a3d45); position: relative; }
+      .skin-count {
+        position: absolute; top: 0.2rem; right: 0.3rem; z-index: 2;
+        font-size: 0.72rem; font-weight: bold; color: #ffd24d;
+        background: rgba(16,17,23,0.85); padding: 0.05rem 0.3rem; border-radius: 3px;
+        text-shadow: 0 0 6px rgba(255,210,77,0.5);
+      }
       .skin-swatch { width: 100%; height: 38px; border-radius: 3px; margin-bottom: 0.4rem;
         box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.6); }
       .skin-rarity { font-size: 0.6rem; letter-spacing: 0.15em; margin-bottom: 0.15rem; }

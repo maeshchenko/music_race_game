@@ -6,6 +6,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { Player } from 'midi-gen/audio';
 import { IS_MOBILE } from '../platform';
 import { World, THEMES, type WorldTheme } from './world';
+import { comboPhrase, recoveryPhrase } from './phrases';
 import { buildCar } from './car';
 import {
   Blocks, LANE_COLORS, LANE_CSS, POWER_COLOR, POWER_CSS,
@@ -240,20 +241,21 @@ export class Game {
     setTimeout(() => el.remove(), 1100);
   }
 
-  /** Вехи комбо. true — названная веха: ей положены вспышка и тряска. */
+  /**
+   * Вехи комбо. true — названная веха (вспышка+тряска): на ней показываем
+   * случайную мотивирующую фразу из пула (тир по величине комбо).
+   */
   private popFx(): boolean {
     const c = this.combo;
-    if (c === 5) this.pop('x5 ПОЕХАЛИ!', 'pop-combo');
-    else if (c === 10) this.pop('x10 СУПЕР!', 'pop-combo pop-super');
-    else if (c === 20) this.pop('x20 ОГОНЬ!!', 'pop-combo pop-super');
-    else if (c === 30) this.pop('x30 НЕОН!!!', 'pop-combo pop-mega');
-    else if (c === 50) this.pop('x50 ЛЕГЕНДА!', 'pop-combo pop-mega');
-    else if (c > 50 && c % 25 === 0) this.pop(`x${c} БЕЗУМИЕ!`, 'pop-combo pop-mega');
-    else {
-      if (c > 1 && c % 5 === 0) this.pop(`x${c}`, 'pop-combo');
-      return false;
+    const named = c === 5 || c === 10 || c === 20 || c === 30 || c === 50
+      || (c > 50 && c % 25 === 0);
+    if (named) {
+      const cls = c >= 30 ? 'pop-combo pop-mega' : c >= 10 ? 'pop-combo pop-super' : 'pop-combo';
+      this.pop(`x${c} ${comboPhrase(c)}!`, cls);
+      return true;
     }
-    return true;
+    if (c > 1 && c % 5 === 0) this.pop(`x${c}`, 'pop-combo');
+    return false;
   }
 
   /** Счёт в HUD «вздрагивает» вместо всплывашки «+очки» на каждый блок. */
@@ -594,7 +596,7 @@ export class Game {
         } else if (b.count > 1) {
           this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
         }
-        if (hadMiss && Math.random() < 0.4) this.pop('ДАВАЙ ЕЩЁ!', 'pop-combo');
+        if (hadMiss && Math.random() < 0.4) this.pop(`${recoveryPhrase()}!`, 'pop-combo');
         this.syncFever();
       },
       () => {

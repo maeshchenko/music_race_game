@@ -29,13 +29,13 @@ export const RARITY: Record<Rarity, { weight: number; dupe: number; css: string;
 /** Скины «семёрки»: цвет кузова. Чистая косметика — коллекция как горизонт. */
 export const SKINS: SkinDef[] = [
   { id: 'cherry', name: 'ВИШНЯ', color: 0x6b1220, price: 0, rarity: 'common' },
-  { id: 'milk', name: 'БЕЛАЯ НОЧЬ', color: 0xd8d8d0, price: 120, rarity: 'common' },
-  { id: 'sand', name: 'ПЕСОК', color: 0xb8a060, price: 200, rarity: 'common' },
-  { id: 'sea', name: 'МОРСКАЯ ВОЛНА', color: 0x1f6b6b, price: 220, rarity: 'rare' },
-  { id: 'graphite', name: 'ГРАФИТ', color: 0x2a2d34, price: 320, rarity: 'rare' },
-  { id: 'neon', name: 'НЕОН-ФИОЛЕТ', color: 0x7a2cff, price: 480, rarity: 'epic' },
-  { id: 'gold', name: 'ЗОЛОТО', color: 0xc8a020, price: 750, rarity: 'epic' },
-  { id: 'plasma', name: 'ПЛАЗМА', color: 0xff2c8a, price: 1100, rarity: 'legendary' },
+  { id: 'milk', name: 'БЕЛАЯ НОЧЬ', color: 0xd8d8d0, price: 1200, rarity: 'common' },
+  { id: 'sand', name: 'ПЕСОК', color: 0xb8a060, price: 2000, rarity: 'common' },
+  { id: 'sea', name: 'МОРСКАЯ ВОЛНА', color: 0x1f6b6b, price: 2200, rarity: 'rare' },
+  { id: 'graphite', name: 'ГРАФИТ', color: 0x2a2d34, price: 3200, rarity: 'rare' },
+  { id: 'neon', name: 'НЕОН-ФИОЛЕТ', color: 0x7a2cff, price: 4800, rarity: 'epic' },
+  { id: 'gold', name: 'ЗОЛОТО', color: 0xc8a020, price: 7500, rarity: 'epic' },
+  { id: 'plasma', name: 'ПЛАЗМА', color: 0xff2c8a, price: 11000, rarity: 'legendary' },
 ];
 
 /** Типы целей миссий — генерим случайно, проверяем по факту заезда. */
@@ -54,6 +54,7 @@ interface MetaState {
   level: number;
   skin: string;
   owned: string[];
+  skinCounts: Record<string, number>; // сколько каждого скина выпало (гача-прогресс)
   missions: Mission[];
   capsules: number; // невскрытые капсулы (награда за левел-ап)
   setBonus: number; // постоянный +множитель очков за выполненные сеты миссий
@@ -66,6 +67,7 @@ interface MetaState {
 
 const FRESH: MetaState = {
   notes: 0, xp: 0, level: 1, skin: 'cherry', owned: ['cherry'],
+  skinCounts: { cherry: 1 },
   missions: [], capsules: 0, setBonus: 0,
   totalBlocks: 0, totalRuns: 0, bestCombo: 0, sessionRuns: 0,
 };
@@ -74,6 +76,9 @@ function load(): MetaState {
   try {
     const s = { ...FRESH, ...JSON.parse(localStorage.getItem(KEY) ?? '{}') };
     if (!s.owned.includes('cherry')) s.owned.push('cherry');
+    if (!s.skinCounts) s.skinCounts = {};
+    // подтянуть счётчики для уже владеемых скинов (миграция старых сейвов)
+    for (const id of s.owned) if (!s.skinCounts[id]) s.skinCounts[id] = 1;
     return s;
   } catch { return { ...FRESH }; }
 }
@@ -227,6 +232,7 @@ export function buySkin(id: string): boolean {
   if (!s || state.owned.includes(id) || state.notes < s.price) return false;
   state.notes -= s.price;
   state.owned.push(id);
+  state.skinCounts[id] = (state.skinCounts[id] ?? 0) + 1;
   save();
   return true;
 }
@@ -239,6 +245,7 @@ export interface CapsuleResult {
   skin: SkinDef; // что выпало (всегда есть — это гача-крутка)
   isNew: boolean; // новый скин или дубль
   notes: number; // компенсация за дубль (0 если новый)
+  count: number; // сколько всего таких скинов уже собрано (прогресс)
 }
 
 /**
@@ -261,8 +268,14 @@ export function openCapsule(): CapsuleResult | null {
   let notes = 0;
   if (isNew) state.owned.push(got.id);
   else { notes = RARITY[got.rarity].dupe; state.notes += notes; }
+  state.skinCounts[got.id] = (state.skinCounts[got.id] ?? 0) + 1;
   save();
-  return { skin: got, isNew, notes };
+  return { skin: got, isNew, notes, count: state.skinCounts[got.id] };
+}
+
+/** Сколько штук скина собрано (для бейджа «xN» в гараже). */
+export function skinCount(id: string): number {
+  return state.skinCounts[id] ?? 0;
 }
 
 export const meta = {

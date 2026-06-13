@@ -102,17 +102,116 @@ function headGlowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+// --- общие геометрии: строятся один раз, делятся всеми машинами ----------
+// (игрок, трафик, припаркованные, гараж). Цвет — только в материалах.
+// Кто диспозит машины (traffic, garage), обязан пропускать эти геометрии.
+
 /**
- * Низкополигональная «семёрка» (ВАЗ-2107) из примитивов: угловатая кабина,
- * хром-бамперы, прямоугольная решётка и фары. ~4.1 × 1.6 м.
+ * Кузов — ручной low-poly хулл: «лофт» из двух боковых профилей (лево/право),
+ * правый чуть уже (сужение к бортам). Профиль кодирует длинный низкий капот,
+ * пояс, короткий багажник и трапециевидные колёсные арки на дне.
+ * Координаты сразу игровые: нос −z, ширина X, высота Y, низ колёс y=0.
+ */
+function buildBodyGeo(): THREE.BufferGeometry {
+  const WIDTH = 1.68;
+  // боковой профиль (x=длина, y=высота). Нос на x=−2.07. Обход: верх слева→
+  // направо (нос→капот→пояс→багажник→корма), вниз, низ направо→налево с
+  // трапециевидными арками (центр перед −1.41, зад +1.02; верх арки y=0.40).
+  // перёд и зад почти вертикальны (как у 2107) — на них сидят фары.
+  // носовая панель высокая и квадратная (не покатая как у гоночной)
+  const pts: [number, number][] = [
+    [-2.04, 0.78], // нос верх — высокий вертикальный торец вровень с капотом
+    [-1.6, 0.82],  // капот (почти плоский, длинный)
+    [-0.7, 0.84],  // база лобового (совпадает с базой кабины)
+    [1.15, 0.84],  // база C-стойки
+    [1.95, 0.80],  // багажник
+    [2.06, 0.70],  // корма верх
+    [2.07, 0.36],  // корма низ — задняя панель почти вертикальна
+    [1.98, 0.24],  // под задним бампером
+    [1.41, 0.24],  // зад арки — задний край низ
+    [1.41, 0.42],  //            верх
+    [0.63, 0.42],  // зад арки — передний край верх (центр +1.02)
+    [0.63, 0.24],  //            низ
+    [-1.03, 0.24], // перед арки — задний край низ
+    [-1.03, 0.42], //             верх
+    [-1.79, 0.42], // перед арки — передний край верх (центр −1.41)
+    [-1.79, 0.24], //             низ
+    [-1.98, 0.24], // под передним бампером
+    [-2.07, 0.34], // нос низ — передняя панель почти вертикальна
+  ];
+  const shape = new THREE.Shape();
+  shape.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], pts[i][1]);
+  shape.closePath();
+  // ExtrudeGeometry: профиль в XY, выдавливаем по +z на ширину; earcut сам
+  // триангулирует невыпуклый контур (арки). Затем разворот в оси игры.
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: WIDTH, bevelEnabled: false, steps: 1 });
+  geo.translate(0, 0, -WIDTH / 2);  // центр ширины в 0
+  geo.rotateY(-Math.PI / 2);        // длина (X) → z (нос −z), ширина → x
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Кабина-greenhouse — сужающийся 8-вершинный хулл: низ (пояс) шире и длиннее,
+ * верх (крыша) уже и короче → наклонное лобовое, покат заднего, плоская
+ * крыша, tumblehome. Координаты игровые. 12 треугольников.
+ */
+function buildGreenhouseGeo(): THREE.BufferGeometry {
+  // длинная плоская крыша, мягкий tumblehome и наклон (как у седана 2107,
+  // НЕ пирамида). Низ (пояс) шире/длиннее, верх (крыша) чуть уже/короче.
+  const v = [
+    [-0.78, 0.84, -0.70], [0.78, 0.84, -0.70], [0.78, 0.84, 1.15], [-0.78, 0.84, 1.15], // низ 0..3
+    [-0.70, 1.42, -0.25], [0.70, 1.42, -0.25], [0.70, 1.42, 0.95], [-0.70, 1.42, 0.95],  // верх 4..7
+  ];
+  const faces = [
+    [0, 1, 5], [0, 5, 4],   // лобовое (−z)
+    [2, 3, 7], [2, 7, 6],   // заднее (+z)
+    [3, 0, 4], [3, 4, 7],   // левый борт (−x)
+    [1, 2, 6], [1, 6, 5],   // правый борт (+x)
+    [4, 5, 6], [4, 6, 7],   // крыша (+y)
+  ];
+  const pos: number[] = [];
+  for (const f of faces) for (const idx of f) pos.push(v[idx][0], v[idx][1], v[idx][2]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const BODY_GEO = buildBodyGeo();
+const GREENHOUSE_GEO = buildGreenhouseGeo();
+const WHEEL_GEO = (() => {
+  const g = new THREE.CylinderGeometry(0.29, 0.29, 0.2, 16);
+  g.rotateZ(Math.PI / 2);
+  return g;
+})();
+const BUMPER_GEO = new THREE.BoxGeometry(1.72, 0.14, 0.18);
+const GRILLE_GEO = new THREE.BoxGeometry(0.74, 0.2, 0.05);
+const HEADLIGHT_GEO = new THREE.BoxGeometry(0.44, 0.2, 0.05);
+const TAILLIGHT_GEO = new THREE.BoxGeometry(0.44, 0.17, 0.05); // широкий горизонтальный (как у 2107)
+
+/** Общие геометрии машины — кто диспозит машину, должен их пропускать. */
+export const SHARED_CAR_GEOS: Set<THREE.BufferGeometry> = new Set([
+  BODY_GEO, GREENHOUSE_GEO, WHEEL_GEO, BUMPER_GEO, GRILLE_GEO, HEADLIGHT_GEO, TAILLIGHT_GEO,
+]);
+
+/**
+ * Низкополигональная «семёрка» (ВАЗ-2107): ручной хулл-кузов с арками,
+ * сужающаяся кабина, хром-бамперы, решётка и фары. ~4.15 × 1.68 × 1.44 м.
  * lightsOn: false — припаркованная (фары и фонари потушены, без прожектора).
  */
 export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: boolean } = {}): THREE.Group {
   const { color = 0x6b1220, lightsOn = true, beam = lightsOn } = opts;
   const car = new THREE.Group();
 
-  const cherry = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.35 });
-  const glass = new THREE.MeshStandardMaterial({ color: 0x0c1018, roughness: 0.15, metalness: 0.6 });
+  // flatShading — фасеточный low-poly вид (грани кузова не сглаживаются)
+  const cherry = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.35, flatShading: true });
+  // кабина сплошная (без стёкол) — тёмная крыша, чтобы не было «дыры».
+  // DoubleSide: хулл-кабина видна с любой стороны (не зависит от winding)
+  const roofMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2d34, roughness: 0.5, metalness: 0.3, flatShading: true, side: THREE.DoubleSide,
+  });
   const chrome = new THREE.MeshStandardMaterial({ color: 0xb9bec6, roughness: 0.25, metalness: 0.9 });
   const rubber = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.95 });
   // передняя фара: текстурная линза (белый свет + оранжевый поворотник).
@@ -148,63 +247,57 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
     return m;
   };
 
-  // нижний кузов (нос — в -z)
-  add(new THREE.BoxGeometry(1.62, 0.52, 4.1), cherry, 0, 0.52, 0);
-  // капот и багажник чуть ниже крыши кабины — кабина отдельным объёмом
-  add(new THREE.BoxGeometry(1.5, 0.42, 1.7), glass, 0, 0.98, 0.15); // остекление
-  add(new THREE.BoxGeometry(1.54, 0.06, 1.8), cherry, 0, 1.22, 0.15); // крыша
-  // стойки по углам кабины
-  const pillarGeo = new THREE.BoxGeometry(0.07, 0.46, 0.07);
-  for (const [px, pz] of [[-0.72, -0.68], [0.72, -0.68], [-0.72, 0.98], [0.72, 0.98]])
-    add(pillarGeo, cherry, px, 0.98, pz + 0.15);
+  // --- кузов по чертежу ВАЗ-2107 ---------------------------------------
+  // длина 4145, ширина 1680, высота 1435, база 2424, свесы 664/1057 (мм).
+  // нос в -z. Хулл-кузов с арками + сужающаяся кабина (общие геометрии).
+  add(BODY_GEO, cherry, 0, 0, 0);
+  add(GREENHOUSE_GEO, roofMat, 0, 0, 0);
 
-  // бамперы
-  add(new THREE.BoxGeometry(1.7, 0.14, 0.18), chrome, 0, 0.38, -2.1);
-  add(new THREE.BoxGeometry(1.7, 0.14, 0.18), chrome, 0, 0.38, 2.1);
-  // решётка радиатора
-  add(new THREE.BoxGeometry(0.7, 0.18, 0.05), chrome, 0, 0.62, -2.06);
-  // фары и задние фонари
-  add(new THREE.BoxGeometry(0.42, 0.18, 0.05), headlightL, -0.55, 0.62, -2.06);
-  add(new THREE.BoxGeometry(0.42, 0.18, 0.05), headlightR, 0.55, 0.62, -2.06);
+  // бамперы (низко, обхватывают торцы)
+  add(BUMPER_GEO, chrome, 0, 0.3, -2.02);
+  add(BUMPER_GEO, chrome, 0, 0.3, 2.02);
+  // решётка радиатора (центр-низ носовой панели)
+  add(GRILLE_GEO, chrome, 0, 0.5, -2.06);
+  // фары — проступают на носовой панели, выше решётки
+  add(HEADLIGHT_GEO, headlightL, -0.56, 0.6, -2.07);
+  add(HEADLIGHT_GEO, headlightR, 0.56, 0.6, -2.07);
   // белый ореол передних фар — мягкое свечение «в тумане». depthTest:true,
   // чтобы у своей машины кузов прятал ореол сзади, а у встречных — виден
   if (lightsOn) {
     const hg = headGlowTexture();
-    for (const sx of [-0.55, 0.55]) {
+    for (const sx of [-0.56, 0.56]) {
       const spr = new THREE.Sprite(new THREE.SpriteMaterial({
         map: hg, color: 0xfff0e0, transparent: true, opacity: 0.3,
         blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
       }));
-      spr.position.set(sx, 0.62, -2.14);
+      spr.position.set(sx, 0.6, -2.13);
       spr.scale.set(1.1, 0.8, 1);
       car.add(spr);
     }
   }
-  // линза-бокс поменьше — тёмный корпус не выпирает «полоской» из-под свечения
-  add(new THREE.BoxGeometry(0.36, 0.13, 0.04), taillight, -0.52, 0.62, 2.07).name = 'taillight';
-  add(new THREE.BoxGeometry(0.36, 0.13, 0.04), taillight, 0.52, 0.62, 2.07).name = 'taillight';
+  // габариты — широкие у внешних углов кормы, проступают наружу
+  add(TAILLIGHT_GEO, taillight, -0.6, 0.55, 2.07).name = 'taillight';
+  add(TAILLIGHT_GEO, taillight, 0.6, 0.55, 2.07).name = 'taillight';
   // мягкий ореол свечения — фара «в тумане», аддитивно, ловится bloom.
   // depthTest:false — бампер на поворотах не протыкает ореол
   if (lightsOn) {
     const glowTex = tailGlowTexture();
-    for (const sx of [-0.52, 0.52]) {
+    for (const sx of [-0.6, 0.6]) {
       const spr = new THREE.Sprite(new THREE.SpriteMaterial({
         map: glowTex, color: 0xff4424, transparent: true, opacity: 0.34,
         blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
         toneMapped: false,
       }));
-      spr.position.set(sx, 0.62, 2.18);
-      spr.scale.set(1.15, 0.85, 1);
+      spr.position.set(sx, 0.55, 2.13);
+      spr.scale.set(1.25, 0.62, 1);
       spr.name = 'tailglow';
       car.add(spr);
     }
   }
 
-  // колёса
-  const wheelGeo = new THREE.CylinderGeometry(0.31, 0.31, 0.2, 14);
-  wheelGeo.rotateZ(Math.PI / 2);
-  for (const [wx, wz] of [[-0.78, -1.32], [0.78, -1.32], [-0.78, 1.32], [0.78, 1.32]])
-    add(wheelGeo, rubber, wx, 0.31, wz);
+  // колёса: радиус 0.29, оси перед −1.41 / зад +1.02 (центры арок), x ±0.71
+  for (const [wx, wz] of [[-0.71, -1.41], [0.71, -1.41], [-0.71, 1.02], [0.71, 1.02]])
+    add(WHEEL_GEO, rubber, wx, 0.29, wz);
 
   if (beam) {
     // свет фар — тёплое пятно перед машиной (только у машины игрока:
