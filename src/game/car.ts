@@ -11,7 +11,7 @@ function taillightTexture(): THREE.CanvasTexture {
   c.width = W; c.height = H;
   const g = c.getContext('2d')!;
   g.fillStyle = '#1a0402'; g.fillRect(0, 0, W, H);
-  g.filter = 'blur(2.5px)'; // размытие линзы — мягкое свечение, не резко
+  g.filter = 'blur(1.4px)'; // размытие линзы — мягкое свечение, не резко
   // основное тёплое красное тело лампы
   const body = g.createRadialGradient(32, 17, 2, 32, 20, 33);
   body.addColorStop(0, '#ff8a4a');
