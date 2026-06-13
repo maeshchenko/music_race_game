@@ -48,7 +48,7 @@ menu.innerHTML = SIMPLE_MENU
       <button id="garage" class="small">🔧 ГАРАЖ <span id="cap-badge" class="cap-badge"></span></button>
       <span id="menu-bal" class="menu-bal"></span>
     </div>
-    <p class="hint">мышь — руль · F — полный экран · C — салон · 0 — погода · пробел — пауза</p>
+    <p class="hint">мышь — руль · F — полный экран · C — салон · пробел — пауза</p>
   </div>
 `
   : `
@@ -398,10 +398,10 @@ function showResults() {
     <div class="res-missions">${missionsHtml}</div>
     ${setHtml}
     ${unlockHtml}
-    <div class="res-next">${meta.sessionRuns}-й заезд · следующий через <span id="cnt">${left}</span></div>
-    <div><button id="res-replay" class="small">ЕЩЁ РАЗ (R)</button>
+    <div class="res-next">${meta.sessionRuns}-й заезд · новый трек через <span id="cnt">${left}</span></div>
+    <div><button id="res-replay" class="small">↻ ЭТОТ ЖЕ ТРЕК (R)</button>
       ${meta.capsules > 0 ? `<button id="res-garage" class="small">🎁 КАПСУЛ: ${meta.capsules}</button>` : ''}</div>
-    <div class="res-hint">клик или пробел — сразу дальше · Esc — меню</div>
+    <div class="res-hint">клик или пробел — НОВЫЙ трек · Esc — меню</div>
   `;
   app.appendChild(results);
   // XP-полоса заполняется анимацией (goal-gradient — близость цели видна)
