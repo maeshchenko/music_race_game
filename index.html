@@ -129,6 +129,11 @@
       /* #45 климакс-переход: полноэкранная вспышка + тройная ударная волна +
          слэм-текст + сабтайтл. Это не «финиш», а хайп-дроп — гоним дальше. */
       .finale-fx { position: absolute; inset: 0; z-index: 7; pointer-events: none; overflow: hidden; }
+      .finale-veil {
+        position: absolute; inset: 0; background: #fff;
+        animation: finale-veil 0.55s ease-out forwards;
+      }
+      @keyframes finale-veil { 0% { opacity: 0; } 9% { opacity: 0.92; } 100% { opacity: 0; } }
       .finale-flash {
         position: absolute; inset: -15%;
         background: radial-gradient(circle at 50% 50%, rgba(255,248,225,1), rgba(255,190,80,0.7) 30%, rgba(255,140,50,0.25) 52%, transparent 72%);

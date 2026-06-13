@@ -667,12 +667,20 @@ export class Game {
     // #45 КЛИМАКС: ощутимый слоумо-фриз «прожить пик» + залпы салюта в небо
     // волнами 1.8с + золотая вспышка краёв всего экрана + всплеск блума.
     this.finaleCamT = t;
-    this.hitStop = Math.max(this.hitStop, 0.16); // ощутимая пауза-удар
     this.shake = 0.95;
     this.flash('#ffd24d');
     this.sfx.jackpot();
     this.sfx.boom(); // саб-бум — ощутимый «бах»
     this.haptic([50, 70, 110]);
+    // BULLET-TIME: мир (музыка+блоки+машина) резко проваливается в слоумо и
+    // через ~0.5с выстреливает обратно в норму — главный источник масштаба.
+    // (если игрок держит турбо — не трогаем его темп)
+    if (!this.nosActive) {
+      this.conductor?.setRate(0.4, 0.12);
+      setTimeout(() => {
+        if (!this.disposed && !this.nosActive) this.conductor?.setRate(1, 0.9);
+      }, 480);
+    }
     // климакс-ПЕРЕХОД (не «финиш» — едем дальше!): полноэкранная вспышка +
     // тройная ударная волна + хайп-слэм + подпись со след. треком
     const HYPE = ['ГОНИМ ДАЛЬШЕ!', 'ЕЩЁ ТРЕК!', 'ОГОНЬ — ДАЛЬШЕ!', 'НЕ ТОРМОЗИ!', 'ПОЕХАЛИ!', 'ДАВАЙ ЕЩЁ!'];
@@ -680,7 +688,7 @@ export class Game {
     const genre = this.chain?.genreAt(t) ?? '';
     const fx = document.createElement('div');
     fx.className = 'finale-fx';
-    fx.innerHTML = '<div class="finale-flash"></div>'
+    fx.innerHTML = '<div class="finale-veil"></div><div class="finale-flash"></div>'
       + '<div class="finale-ring" style="--d:0s"></div>'
       + '<div class="finale-ring" style="--d:.13s"></div>'
       + '<div class="finale-ring" style="--d:.26s"></div>'
