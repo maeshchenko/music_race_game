@@ -206,6 +206,9 @@ export class World {
   private vazColors = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
   private sharedGeos: Set<THREE.BufferGeometry>;
   private pooled: THREE.SpotLight[] = [];
+  // переиспользуемый пул позиций ближних фонарей — без аллокаций/sort в кадре
+  private headPool: THREE.Vector3[] = [];
+  private headUsed: boolean[] = [];
   private snow: THREE.Points | null = null;
   private snowVel: Float32Array = new Float32Array(0);
   private SNOW_N: number;
@@ -530,22 +533,38 @@ export class World {
         this.recycle(c, c.index + CHUNKS);
     }
 
-    // пул SpotLight — к ближайшим фонарям вокруг машины
-    const heads: THREE.Vector3[] = [];
+    // пул SpotLight — к ближайшим фонарям вокруг машины.
+    // собираем кандидатов в переиспользуемый пул (без new Vector3 в кадре)
+    let hc = 0;
     for (const c of this.chunks)
       for (const h of c.lampHeads) {
         const wz = h.z + c.group.position.z;
-        if (wz < carPos.z + 12 && wz > carPos.z - 60)
-          heads.push(new THREE.Vector3(h.x, h.y, wz));
+        if (wz < carPos.z + 12 && wz > carPos.z - 60) {
+          let v = this.headPool[hc];
+          if (!v) { v = new THREE.Vector3(); this.headPool[hc] = v; }
+          v.set(h.x, h.y, wz);
+          hc++;
+        }
       }
-    heads.sort((a, b) => Math.abs(a.z - carPos.z) - Math.abs(b.z - carPos.z));
-    this.pooled.forEach((l, i) => {
-      if (heads[i]) {
+    // каждому прожектору — ближайший свободный кандидат (выбор минимумом вместо
+    // полной сортировки с замыканием каждый кадр); фонарей мало → дёшево
+    for (let k = 0; k < hc; k++) this.headUsed[k] = false;
+    for (let i = 0; i < this.pooled.length; i++) {
+      const l = this.pooled[i];
+      let best = -1, bestD = Infinity;
+      for (let k = 0; k < hc; k++) {
+        if (this.headUsed[k]) continue;
+        const d = Math.abs(this.headPool[k].z - carPos.z);
+        if (d < bestD) { bestD = d; best = k; }
+      }
+      if (best >= 0) {
+        this.headUsed[best] = true;
+        const v = this.headPool[best];
         l.visible = true;
-        l.position.copy(heads[i]);
-        l.target.position.set(heads[i].x, heads[i].y - 5.1, heads[i].z);
+        l.position.copy(v);
+        l.target.position.set(v.x, v.y - 5.1, v.z);
       } else l.visible = false;
-    });
+    }
 
     // снег: по x/z хлопья неподвижны, падение с обёрткой бокса вокруг машины
     if (!this.snow) return;
@@ -557,16 +576,22 @@ export class World {
     const xMin = carPos.x - this.SNOW_BOX.x / 2; // бокс следует за машиной в поворотах
     const xSpan = this.SNOW_BOX.x;
     const yBase = carPos.y - 3; // снежный слой следует за рельефом
+    const yTop = yBase + this.SNOW_BOX.y;
+    const xMax = xMin + xSpan, zMax = zMin + zSpan;
+    const swayDt = (this.theme.precip === 'rain' ? 0.08 : 0.4) * dt; // инвариант — из цикла
     for (let i = 0; i < this.SNOW_N; i++) {
       let y = arr[i * 3 + 1] - this.snowVel[i * 2] * dt;
       if (y < yBase) y += this.SNOW_BOX.y;
-      else if (y > yBase + this.SNOW_BOX.y) y = yBase + Math.random() * this.SNOW_BOX.y;
+      else if (y > yTop) y = yBase + Math.random() * this.SNOW_BOX.y;
       arr[i * 3 + 1] = y;
-      const sway = this.theme.precip === 'rain' ? 0.08 : 0.4; // дождь падает прямо
-      const x = arr[i * 3] + Math.sin(t * 1.3 + this.snowVel[i * 2 + 1]) * dt * sway;
-      arr[i * 3] = xMin + ((((x - xMin) % xSpan) + xSpan) % xSpan);
-      const z = arr[i * 3 + 2];
-      arr[i * 3 + 2] = zMin + ((((z - zMin) % zSpan) + zSpan) % zSpan);
+      // враппинг вычитанием вместо двойного modulo — заметно дешевле на ~1600 частиц
+      let x = arr[i * 3] + Math.sin(t * 1.3 + this.snowVel[i * 2 + 1]) * swayDt;
+      if (x < xMin) x += xSpan; else if (x >= xMax) x -= xSpan;
+      arr[i * 3] = x;
+      let z = arr[i * 3 + 2]; // бокс едет за машиной — z перевешиваем относительно него
+      while (z < zMin) z += zSpan;
+      while (z >= zMax) z -= zSpan;
+      arr[i * 3 + 2] = z;
     }
     attr.needsUpdate = true;
   }

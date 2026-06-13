@@ -87,13 +87,40 @@ let countdownTimer = 0;
 
 const randomGenre = (): GameGenre => GENRES[Math.floor(Math.random() * GENRES.length)];
 
+// --- генерация трека в воркере: тяжёлый синтез вне UI-потока (без фриза) ----
+let songWorker: Worker | null = null;
+let songSeq = 0;
+const songWaiters = new Map<number, (s: Song) => void>();
+
+function getSongWorker(): Worker | null {
+  if (songWorker) return songWorker;
+  try {
+    songWorker = new Worker(new URL('./music-gen.worker.ts', import.meta.url), { type: 'module' });
+    songWorker.onmessage = (e: MessageEvent<{ id: number; song: Song }>) => {
+      const done = songWaiters.get(e.data.id);
+      if (done) { songWaiters.delete(e.data.id); done(e.data.song); }
+    };
+    songWorker.onerror = () => { songWorker = null; }; // упал — дальше синхронный fallback
+  } catch { songWorker = null; }
+  return songWorker;
+}
+
+/** Песня вне главного потока; если воркер недоступен — синхронный fallback. */
+function newSongAsync(genre: GameGenre): Promise<Song> {
+  const w = getSongWorker();
+  if (!w) return Promise.resolve(newSong(genre));
+  return new Promise((resolve) => {
+    const id = ++songSeq;
+    songWaiters.set(id, resolve);
+    w.postMessage({ id, genre });
+  });
+}
+
 /** Генерация следующего трека заранее — переход между заездами без паузы. */
 function pregenNext() {
-  const idle: (f: () => void) => void =
-    'requestIdleCallback' in window
-      ? (f) => requestIdleCallback(f)
-      : (f) => void setTimeout(f, 1200);
-  idle(() => { if (!nextSong) nextSong = newSong(randomGenre()); });
+  if (nextSong) return;
+  newSongAsync(randomGenre()).then((s) => { nextSong = s; })
+    .catch(() => { nextSong = newSong(randomGenre()); });
 }
 // --- громкость: музыка через мастер, эффекты — смещением в Sfx ----------
 const VOL_KEY = 'race2107:vol';
@@ -200,16 +227,46 @@ function renderDiffs() {
   });
 }
 
+// --- лоадер заезда: готовим всё (трек+уровень+аудио+шейдеры), старт когда готово
+let loaderEl: HTMLDivElement | null = null;
+function showLoader() {
+  if (loaderEl) return;
+  loaderEl = document.createElement('div');
+  loaderEl.className = 'menu';
+  loaderEl.style.zIndex = '50';
+  loaderEl.innerHTML = `
+    <div class="panel">
+      <div class="title-3d" style="font-size:2rem">2107</div>
+      <p class="sub" id="loader-msg">генерируем трассу…</p>
+      <div style="width:240px;height:8px;background:#ffffff22;border-radius:4px;
+        overflow:hidden;margin:1.2rem auto 0">
+        <div id="loader-fill" style="width:0%;height:100%;border-radius:4px;
+          background:linear-gradient(90deg,#22ffee,#ff44ff);transition:width .25s ease"></div>
+      </div>
+    </div>`;
+  app.appendChild(loaderEl);
+}
+function setLoader(pct: number, msg?: string) {
+  const f = loaderEl?.querySelector<HTMLElement>('#loader-fill');
+  if (f) f.style.width = `${pct}%`;
+  const m = loaderEl?.querySelector<HTMLElement>('#loader-msg');
+  if (m && msg) m.textContent = msg;
+}
+function hideLoader() { loaderEl?.remove(); loaderEl = null; }
+
+/** Пауза до следующего кадра — дать лоадеру перерисоваться между шагами. */
+const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+
 // --- игровой цикл ----------------------------------------------------------
 
 async function startRide() {
   clearResults();
-  stopMenuSnow();
-  menu.style.display = 'none';
-  // простой флоу: каждый заезд — свежий случайный трек (жанр тоже случайный),
-  // следующий уже готов из pregenNext — без паузы между заездами
+  showLoader(); // оверлей сразу: вся тяжёлая подготовка прячется за ним
+  setLoader(10, 'генерируем трассу…');
+  await nextPaint();
+  // свежий случайный трек; следующий уже готов из pregenNext
   if (SIMPLE_MENU && !replayRequested) {
-    tracks = [nextSong ?? newSong(randomGenre())];
+    tracks = [nextSong ?? await newSongAsync(randomGenre())];
     nextSong = null;
     sel = 0;
   }
@@ -221,16 +278,30 @@ async function startRide() {
   const gold = luckyRun || goldDrought >= 2 || Math.random() < 0.45;
   goldDrought = gold ? 0 : goldDrought + 1;
   const mystery = luckyRun ? 3 : 2;
-  player = createStemPlayer(song);
+  const sp = createStemPlayer(song);
+  player = sp;
   const theme = pickTheme(); // новизна: палитра+погода каждый заезд
+  setLoader(40, 'строим мир…');
+  await nextPaint();
   game = new Game(app, song, buildLevel(song), player, diff, audioOffsetMs / 1000,
     { gold, mystery, lucky: luckyRun, best: loadBest()?.score ?? 0,
       carColor: meta.skinColor, theme });
   // результаты — после финишного наката (машина докатилась), не по концу музыки
   game.onFinish = showResults;
+  setLoader(65, 'настраиваем звук…');
+  await nextPaint();
+  await sp.prepare(); // ноды + reverb-IR заранее — без хитча в игре
+  setLoader(90, 'прогреваем графику…');
+  await nextPaint();
+  game.warmup(); // прекомпиляция шейдеров до старта — первый кадр без лага
+  setLoader(100, 'поехали!');
+  // всё готово — убираем меню+лоадер и стартуем синхронно со звуком
+  stopMenuSnow();
+  menu.style.display = 'none';
+  hideLoader();
   game.start();
   applyVolumes(); // смещение эффектов — на свежесозданный Sfx
-  await player.play();
+  await sp.play();
   pregenNext();
   Object.assign(window as never, { __player: player, __game: game }); // отладка
 }

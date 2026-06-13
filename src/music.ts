@@ -10,7 +10,7 @@ export function newSong(genre: GameGenre): Song {
   // без minutes — естественная форма жанра (~40–65 с);
   // отбор сидов держит верхнюю границу у минуты
   let best: Song | null = null;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 4; i++) { // синхронный fallback; основной путь — воркер
     const s = generate({ genre });
     const sec = songDurationSec(s);
     if (sec <= 63) return s;
@@ -126,6 +126,8 @@ export function analyzeSong(song: Song): SongFeatures {
 export interface StemPlayer extends Player {
   /** Текущий открытый тир слоёв: 0 — база, 2 — всё звучит. */
   setTier(tier: number): void;
+  /** Прогрев до старта: строит ноды и ждёт готовности reverb-IR (без хитча в игре). */
+  prepare(): Promise<void>;
 }
 
 type Role = Song['tracks'][number]['role'];
@@ -144,6 +146,7 @@ export function createStemPlayer(song: Song): StemPlayer {
   let playing = false;
   let tier = 0;
   let endEventId = -1;
+  let latCache = 0, latCalls = 0; // кэш аудио-latency для positionSec
   const transport = Tone.getTransport();
 
   const scheduleEnd = () => {
@@ -182,9 +185,17 @@ export function createStemPlayer(song: Song): StemPlayer {
   const player: StemPlayer = {
     durationSec,
     setTier: (t) => { tier = t; },
+    // прогрев до старта рендер-лупа: создаём ~40 Tone-нод и ждём генерации
+    // reverb-IR здесь, а не внутри первого play() поверх уже крутящегося кадра
+    async prepare() {
+      await Tone.start();
+      if (!ensemble) build();
+      await ensemble!.ready;
+    },
     async play() {
       await Tone.start();
       if (!ensemble) build();
+      await ensemble!.ready; // reverb-IR готов — без глитча в первую секунду
       if (playing) return;
       playing = true;
       transport.loop = false;
@@ -203,8 +214,15 @@ export function createStemPlayer(song: Song): StemPlayer {
     positionSec: () => {
       const ctx = Tone.getContext();
       const raw = ctx.rawContext as AudioContext;
-      const latency = ctx.lookAhead + (raw.outputLatency || raw.baseLatency || 0);
-      return Math.max(0, Math.min(transport.seconds - latency, durationSec));
+      // ЖЁСТКАЯ ГАРАНТИЯ: пока контекст реально не играет (suspended/autoplay-гейт),
+      // позиция = 0 → машина стоит. Не бывает езды без слышимого звука.
+      if (raw.state !== 'running') return 0;
+      // latency почти постоянна — пересчитываем ~раз в 30 вызовов (≈0.5 с),
+      // а не каждый кадр; чтение outputLatency дороже и дрожит
+      if (latCalls++ % 30 === 0) {
+        latCache = ctx.lookAhead + (raw.outputLatency || raw.baseLatency || 0);
+      }
+      return Math.max(0, Math.min(transport.seconds - latCache, durationSec));
     },
     setLoop: () => { /* стем-плеер всегда без лупа — заезд конечен */ },
     looping: () => false,

@@ -86,6 +86,7 @@ export class Blocks {
   private dummy = new THREE.Object3D();
   private colorTmp = new THREE.Color();
   private density = 1; // DDA: 1 — все блоки, <1 — часть прорежена
+  private frame = 0; // счётчик кадров — для half-rate анимации дальних блоков
 
   /** Невидимая адаптивная сложность: доля оставляемых нот (0.55–1). */
   setDensity(d: number) { this.density = Math.max(0.55, Math.min(1, d)); }
@@ -363,10 +364,16 @@ export class Blocks {
     // вращение и пульс ближних видимых
     const pulseAmp = fever ? 0.16 : 0.07;
     let colorDirty = false;
+    this.frame++;
+    const odd = this.frame & 1;
     for (let i = this.cursor; i < this.defs.length; i++) {
       const b = this.defs[i];
       if (b.dist > carDist + 170) break;
       if (b.collected || b.dropped) continue;
+      // дальние (>70 м) обновляем через кадр (≈30 Гц): на таком расстоянии
+      // вращение на глаз неотличимо, а матричной работы вдвое меньше. Чётность
+      // по индексу — половина дальних обновляется каждый кадр, без мерцания
+      if (b.dist > carDist + 70 && ((i ^ odd) & 1)) continue;
       this.dummy.position.set(b.x, b.y, -b.dist);
       if (b.kind === 'magnet') {
         // бонус крутится заметно быстрее и крупнее

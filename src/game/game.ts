@@ -21,6 +21,17 @@ import type { Song } from 'midi-gen/core';
 
 const STEER_RANGE = 3.2;
 
+// константы кадра — выносим из tick, чтобы не аллоцировать каждый кадр/сбор
+const MILESTONES = [0, 5, 10, 15, 20, 30, 50];
+const fmtTime = (s: number) =>
+  `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+// цвета искр — переиспользуемые инстансы вместо new THREE.Color на каждое событие
+const C_GOLD = new THREE.Color('#ffd24d');
+const C_GOLD_SPARK = new THREE.Color('#fff3a0');
+const C_WHITE = new THREE.Color('#ffffff');
+const C_PERFECT = new THREE.Color('#ffe9a0');
+const C_SHIELD = new THREE.Color('#44d6ff');
+
 export class Game {
   private renderer: THREE.WebGLRenderer;
   private composer: EffectComposer | null = null;
@@ -73,6 +84,13 @@ export class Game {
   private tailGlows: THREE.Sprite[] = []; // ореолы свечения фар
   private fpsEMA = 60; // сглаженный FPS для дебаг-лога (НЕ УДАЛЯТЬ — нужен до релиза)
   private logAcc = 0; // аккумулятор для лога раз в секунду
+  private hudAcc = 0; // аккумулятор обновления HUD (~15 Гц вместо каждого кадра)
+  private lastHud = ''; // прошлый текст HUD — пропускаем одинаковые DOM-записи
+  // авто-деградация качества: включается ТОЛЬКО когда FPS устойчиво просел
+  private baseRatio = Math.min(devicePixelRatio, 1.5);
+  private qualityLow = false;
+  private lowFpsAcc = 0;
+  private highFpsAcc = 0;
   private prevSpeed = 0; // для определения торможения (яркость задней фары)
   // финиш: камера остаётся у ворот, машина катится по инерции и плавно тормозит
   private finished = false;
@@ -86,6 +104,10 @@ export class Game {
   private firstPerson = false;
   paused = false;
   private tEst = 0; // сглаженные часы музыки
+  private errSmooth = 0; // сглаженная ошибка рассинхрона — гасит дрожь outputLatency, не теряя точность
+  private audioStarted = false; // звук реально зазвучал — машина трогается только тогда
+  private vxSmooth = 0; // сглаженная боковая скорость — крен без высокочастотной тряски
+  private camScratch = new THREE.Vector3(); // переиспользуемый вектор камеры — без аллокаций в кадре
   private clock = new THREE.Clock();
   private raf = 0;
   private disposed = false;
@@ -161,6 +183,10 @@ export class Game {
       );
       this.composer.addPass(this.bloomPass);
       this.composer.addPass(new OutputPass());
+      // bloom в half-res: визуально почти идентично (bloom — и так размытие),
+      // но вчетверо меньше пикселей под тяжёлый пасс → запас GPU под звук.
+      // addPass уже выставил полный размер — переустанавливаем на половину
+      this.applyBloomRes();
     }
 
     this.hud = document.createElement('div');
@@ -264,9 +290,10 @@ export class Game {
 
   /** Счёт в HUD «вздрагивает» вместо всплывашки «+очки» на каждый блок. */
   private scoreBump() {
+    // перезапуск CSS-анимации без forced reflow (void offsetWidth дёргал layout
+    // на каждый собранный блок): снимаем класс и возвращаем на следующем кадре
     this.hud.classList.remove('bump');
-    void this.hud.offsetWidth; // перезапуск CSS-анимации
-    this.hud.classList.add('bump');
+    requestAnimationFrame(() => { if (!this.disposed) this.hud.classList.add('bump'); });
   }
 
   /**
@@ -343,12 +370,11 @@ export class Game {
 
   /** Церемония рекорда на финише: золотой салют вокруг машины. */
   celebrate() {
-    const gold = new THREE.Color('#ffd24d');
     const { x, y, z } = this.car.position;
     for (let k = 0; k < 3; k++)
       setTimeout(() => {
         if (this.disposed) return;
-        this.particles.burst(x + (Math.random() - 0.5) * 4, y + 1.5, z - 2 - k * 2, gold, 50);
+        this.particles.burst(x + (Math.random() - 0.5) * 4, y + 1.5, z - 2 - k * 2, C_GOLD, 50);
         this.shake = Math.min(0.5, this.shake + 0.25);
       }, k * 220);
     this.flash('#ffd24d');
@@ -364,12 +390,45 @@ export class Game {
     }
   };
 
+  /**
+   * Самолечение от просадок: снижаем pixelRatio, когда железо устойчиво не
+   * тянет, и возвращаем, когда отпустит. На нормальном железе не срабатывает —
+   * визуал 1:1. low → 0.7× базового разрешения (резкий запас GPU/CPU).
+   */
+  private setQuality(low: boolean) {
+    if (low === this.qualityLow) return;
+    this.qualityLow = low;
+    this.renderer.setPixelRatio(low ? Math.max(1, this.baseRatio * 0.7) : this.baseRatio);
+    this.renderer.setSize(innerWidth, innerHeight);
+    this.composer?.setSize(innerWidth, innerHeight);
+    this.applyBloomRes();
+  }
+
+  /** Размер bloom-пасса = половина экрана (вызывать после composer.setSize). */
+  private applyBloomRes() {
+    this.bloomPass?.setSize(
+      Math.max(1, Math.round(innerWidth / 2)), Math.max(1, Math.round(innerHeight / 2)),
+    );
+  }
+
   private onResize = () => {
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(innerWidth, innerHeight);
     this.composer?.setSize(innerWidth, innerHeight);
+    this.applyBloomRes(); // composer.setSize сбросил на полный — вернуть половину
   };
+
+  /**
+   * Прогрев до старта: прекомпиляция шейдеров и инициализация буферов
+   * постобработки. Без него первый игровой кадр компилирует шейдеры «на лету»
+   * и заметно лагает — здесь это происходит под лоадером, до начала заезда.
+   */
+  warmup() {
+    this.renderer.compile(this.world.scene, this.camera);
+    if (this.composer) this.composer.render();
+    else this.renderer.render(this.world.scene, this.camera);
+  }
 
   start() {
     this.grabPointer(); // мы внутри клика «ПОЕХАЛИ» — жест есть
@@ -396,17 +455,34 @@ export class Game {
     // (outputLatency в Chrome плавает кадр к кадру), напрямую машина дёргается.
     // Ведём свои часы по dt и мягко подтягиваем к аудио.
     if (!this.paused) {
+      // positionSec возвращает 0, пока аудио-контекст реально не играет —
+      // ГАРАНТИЯ: машина не трогается без слышимого звука
       const reported = this.player.positionSec();
-      this.tEst += dt;
-      const err = reported - this.tEst;
-      // огромный расход (>2с) = перезапуск/seek — только тогда жёсткий сброс.
-      // иначе ВСЕГДА плавный слью без телепорта: коррекция капается ±60% хода,
-      // чтобы заминка синтеза (резкий скачок позиции) не дёргала машину.
-      if (Math.abs(err) > 2) {
-        this.tEst = reported;
-      } else {
-        const maxCorr = 0.6 * dt; // не быстрее +60% / медленнее −40% реального
-        this.tEst += THREE.MathUtils.clamp(err * 0.5, -maxCorr, maxCorr);
+      if (!this.audioStarted) {
+        if (this.player.isPlaying() && reported > 0) {
+          this.audioStarted = true; // первый слышимый звук — поехали в синхрон
+        } else {
+          this.tEst = 0; // ждём звук на старте
+          this.errSmooth = 0;
+        }
+      }
+      // после старта транзиентный провал reported=0 (заминка/авто-suspend) лишь
+      // замораживает часы на кадр — НЕ телепортирует машину обратно на старт
+      if (this.audioStarted && reported > 0) {
+        this.tEst += dt;
+        const err = reported - this.tEst;
+        // огромный расход (>2с) = перезапуск/seek — только тогда жёсткий сброс
+        if (Math.abs(err) > 2) {
+          this.tEst = reported;
+          this.errSmooth = 0;
+        } else {
+          // СИНХРОН — суть ритм-игры: блоки стоят на тайминге нот и собираются
+          // ровно когда нота звучит. tEst обязан держаться позиции звука.
+          // outputLatency в Chrome дрожит кадр к кадру → сглаживаем САМ сигнал
+          // ошибки (убираем дрожь), но тянем уверенно: нет ни лага, ни тряски.
+          this.errSmooth += (err - this.errSmooth) * Math.min(1, dt * 8);
+          this.tEst += this.errSmooth * Math.min(1, dt * 6);
+        }
       }
     }
     const t = Math.max(0, this.tEst + this.audioOffset);
@@ -454,7 +530,11 @@ export class Game {
     const target = THREE.MathUtils.clamp(this.mouseX, -1, 1) * STEER_RANGE;
     const prevX = this.carX;
     this.carX = THREE.MathUtils.damp(this.carX, target, 14, dt);
-    const vx = (this.carX - prevX) / Math.max(dt, 1e-4);
+    // боковая скорость для крена/доворота — сглажена EMA: сырой Δ/dt шумит на
+    // плавающем dt и микродвижениях мыши, отчего машину мелко потряхивает
+    const vxRaw = (this.carX - prevX) / Math.max(dt, 1e-4);
+    this.vxSmooth += (vxRaw - this.vxSmooth) * Math.min(1, dt * 12);
+    const vx = this.vxSmooth;
 
     // позиция: ось дороги (повороты) + руление, рельеф + тангаж по уклону
     const cx = this.level.curveAt(dist);
@@ -478,7 +558,7 @@ export class Game {
     if (this.finished) {
       // камера остаётся у финишных ворот и провожает машину взглядом
       const fd = this.level.totalDist;
-      const camPos = new THREE.Vector3(
+      const camPos = this.camScratch.set(
         this.level.curveAt(fd - 8) * 0.7 + this.level.curveAt(fd) * 0.3,
         this.level.heightAt(fd - 8) + 4.0,
         -(fd - 8.5),
@@ -497,7 +577,7 @@ export class Game {
     } else {
       // сзади-сверху, камера держится оси дороги
       const camY = this.level.heightAt(Math.max(0, dist - 7.5)) + 4.2;
-      const camTarget = new THREE.Vector3(
+      const camTarget = this.camScratch.set(
         this.level.curveAt(Math.max(0, dist - 7.5)) + this.carX * 0.6, camY, -dist + 7.5,
       );
       this.camera.position.lerp(camTarget, 1 - Math.exp(-8 * dt));
@@ -542,7 +622,7 @@ export class Game {
           this.bonusNotes += 25;
           this.pop(`💰 ДЖЕКПОТ +${pts}!`, 'pop-combo pop-mega');
           this.flash('#ffd24d');
-          this.particles.burst(b.x, b.y, -b.dist, new THREE.Color('#fff3a0'), 60);
+          this.particles.burst(b.x, b.y, -b.dist, C_GOLD_SPARK, 60);
           this.shake = Math.min(0.6, this.shake + 0.5);
           this.hitStop = 0.07;
           this.sfx.jackpot();
@@ -569,7 +649,7 @@ export class Game {
             this.pop(`❓ 💰 КУШ +${pts}!`, 'pop-combo pop-mega');
           }
           this.flash('#ffffff');
-          this.particles.burst(b.x, b.y, -b.dist, new THREE.Color('#ffffff'), 50);
+          this.particles.burst(b.x, b.y, -b.dist, C_WHITE, 50);
           this.shake = Math.min(0.5, this.shake + 0.3);
           this.sfx.mystery();
           this.scoreBump();
@@ -595,7 +675,7 @@ export class Game {
         // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
         this.particles.burst(b.x, b.y, -b.dist, LANE_COLORS[b.lane + 1], 12 + b.count * 6);
         if (perfect) {
-          this.particles.burst(b.x, b.y + 0.3, -b.dist, new THREE.Color('#ffe9a0'), 8);
+          this.particles.burst(b.x, b.y + 0.3, -b.dist, C_PERFECT, 8);
           if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
         }
         if (milestone) {
@@ -638,7 +718,7 @@ export class Game {
         this.flash('#44d6ff');
         this.shake = Math.min(0.5, this.shake + 0.3);
         this.particles.burst(this.car.position.x, this.car.position.y + 0.8,
-          this.car.position.z, new THREE.Color('#44d6ff'), 30);
+          this.car.position.z, C_SHIELD, 30);
       } else {
         this.missStreak = 0;
         this.breakCombo();
@@ -656,49 +736,56 @@ export class Game {
     // самый длинный отрезок без аварии — для миссии «N с без аварий»
     if (!this.finished) this.noCrashSec = Math.max(this.noCrashSec, t - this.lastCrashT);
 
-    // микроцель: полоска до следующей вехи комбо
-    const milestones = [0, 5, 10, 15, 20, 30, 50];
-    let lo = 0, hi = 5;
-    if (this.combo >= 50) { lo = 50 + Math.floor((this.combo - 50) / 25) * 25; hi = lo + 25; }
-    else {
-      for (let i = 0; i < milestones.length - 1; i++)
-        if (this.combo >= milestones[i] && this.combo < milestones[i + 1]) {
-          lo = milestones[i]; hi = milestones[i + 1];
-        }
-    }
-    this.comboBarFill.style.width = `${((this.combo - lo) / (hi - lo)) * 100}%`;
-
-    // рекорд-призрак: погоня видна в реальном времени, не на результатах
-    let recPart = '';
-    if (this.bestScore > 0 && !this.finished) {
-      if (this.score > this.bestScore) {
-        if (!this.recordBroken) {
-          this.recordBroken = true;
-          this.pop('🏆 РЕКОРД ПОБИТ!', 'pop-combo pop-mega');
-          this.flash('#ffd24d');
-          this.shake = Math.max(this.shake, 0.5);
-        }
-        recPart = ` · 🏆 +${this.score - this.bestScore}`;
-      } else recPart = ` · 🏆 −${this.bestScore - this.score}`;
+    // рекорд-призрак: детект пробития — каждый кадр (это событие, не показ)
+    if (this.bestScore > 0 && !this.finished && this.score > this.bestScore
+        && !this.recordBroken) {
+      this.recordBroken = true;
+      this.pop('🏆 РЕКОРД ПОБИТ!', 'pop-combo pop-mega');
+      this.flash('#ffd24d');
+      this.shake = Math.max(this.shake, 0.5);
     }
 
     const kmh = Math.round(this.level.speedAt(t) * 3.6);
-    const fmt = (s: number) =>
-      `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-    this.hud.textContent =
-      `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
-      `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
-      `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
-      `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
-      `${this.shielded ? ' · 🛡' : ''}` +
-      recPart +
-      ` · ${kmh} км/ч · ${fmt(t)} / ${fmt(this.level.durationSec)}`;
+    // HUD и комбо-полоса — ~15 Гц: на глаз неотличимо, но вчетверо меньше
+    // сборки строк и DOM-записей (счёт «вздрагивает» отдельно в scoreBump)
+    this.hudAcc += dt;
+    if (this.hudAcc >= 0.066) {
+      this.hudAcc = 0;
+      // микроцель: полоска до следующей вехи комбо
+      let lo = 0, hi = 5;
+      if (this.combo >= 50) { lo = 50 + Math.floor((this.combo - 50) / 25) * 25; hi = lo + 25; }
+      else {
+        for (let i = 0; i < MILESTONES.length - 1; i++)
+          if (this.combo >= MILESTONES[i] && this.combo < MILESTONES[i + 1]) {
+            lo = MILESTONES[i]; hi = MILESTONES[i + 1];
+          }
+      }
+      this.comboBarFill.style.width = `${((this.combo - lo) / (hi - lo)) * 100}%`;
 
-    // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее
+      let recPart = '';
+      if (this.bestScore > 0 && !this.finished) {
+        recPart = this.score > this.bestScore
+          ? ` · 🏆 +${this.score - this.bestScore}`
+          : ` · 🏆 −${this.bestScore - this.score}`;
+      }
+      const hud =
+        `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
+        `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
+        `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
+        `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
+        `${this.shielded ? ' · 🛡' : ''}` +
+        recPart +
+        ` · ${kmh} км/ч · ${fmtTime(t)} / ${fmtTime(this.level.durationSec)}`;
+      if (hud !== this.lastHud) { this.hud.textContent = hud; this.lastHud = hud; }
+    }
+
+    // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее.
+    // присваиваем только при заметном изменении — лишние записи в пасс не нужны
     if (this.bloomPass && !this.paused) {
       const phase = (t * this.bpm / 60) % 1;
       const env = Math.max(0, 1 - phase * 3.2);
-      this.bloomPass.strength = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35);
+      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35);
+      if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }
 
     this.world.update(dt, this.car.position);
@@ -707,6 +794,16 @@ export class Game {
 
     // дебаг FPS + скорость раз в секунду (нужен до релиза — НЕ УДАЛЯТЬ)
     if (dt > 0) this.fpsEMA += (1 / dt - this.fpsEMA) * 0.1;
+
+    // авто-деградация: FPS<45 ~2с подряд → ниже качество; FPS>55 ~4с → вернуть
+    if (!this.paused && !this.finished) {
+      if (this.fpsEMA < 45) { this.lowFpsAcc += dt; this.highFpsAcc = 0; }
+      else if (this.fpsEMA > 55) { this.highFpsAcc += dt; this.lowFpsAcc = 0; }
+      else { this.lowFpsAcc = 0; this.highFpsAcc = 0; }
+      if (!this.qualityLow && this.lowFpsAcc > 2) this.setQuality(true);
+      else if (this.qualityLow && this.highFpsAcc > 4) this.setQuality(false);
+    }
+
     this.logAcc += dt;
     if (this.logAcc >= 1 && !this.finished && !this.paused) {
       this.logAcc = 0;
