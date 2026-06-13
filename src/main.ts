@@ -8,8 +8,14 @@ import { IS_MOBILE } from './platform';
 // приоритет Chrome — с маленьким буфером звук захлёбывается и не встаёт.
 // На телефонах вдобавок половиним частоту дискретизации — DSP в ~2 раза
 // дешевле, иначе синтез не успевает и звук с игрой заикаются.
+// lookAhead 0.25с: запас планировщика нот. Создание ансамбля (~30–50мс главного
+// потока, раз в трек) при малом lookAhead роняло тик планировщика → подзвук
+// посреди трека. Больший запас поглощает столл; sync держим через positionSec,
+// который вычитает lookAhead (рассинхрона нет). На SFX не влияет — у них своё
+// низколатентное время от rawContext.
 Tone.setContext(new Tone.Context({
   latencyHint: 'playback',
+  lookAhead: 0.25,
   ...(IS_MOBILE ? { sampleRate: 24000 } : {}),
 }));
 import {
@@ -39,8 +45,8 @@ const DIFF_LABELS: Record<Difficulty, string> = {
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
-// ДИАГНОСТИКА хрипа: ловим длинные таски главного потока (>50мс) — именно они
-// глушат планировщик Tone (lookahead ~0.1с) → музыка захлёбывается. НЕ УДАЛЯТЬ.
+// PERF-МЕТРИКА: длинные таски главного потока (>50мс) глушат планировщик Tone →
+// подзвук. НЕ УДАЛЯТЬ — нужны для оптимизации.
 try {
   new PerformanceObserver((list) => {
     for (const e of list.getEntries()) {
@@ -401,8 +407,7 @@ function onSegmentDone() {
   segPrevBlocks = game.collected;
   segPrevScore = game.score;
   const earned = Math.round(dScore / 30);
-  // ДИАГНОСТИКА: таймим каждый кусок работы стыка — что блокирует главный поток
-  // (и, как следствие, планировщик Tone → хрип). НЕ УДАЛЯТЬ до решения хрипа.
+  // PERF-МЕТРИКА: тайминг работы стыка (что блокирует главный поток). НЕ УДАЛЯТЬ.
   let a = performance.now();
   applyRun({
     blocks: dBlocks, maxCombo: game.maxCombo, magnets: game.magnetsGot,

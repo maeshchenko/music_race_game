@@ -90,7 +90,7 @@ export class EndlessChain implements Level {
     const prev = this.segments[this.segments.length - 1];
     const distOffset = prev ? prev.distEnd : 0;
     const tOffset = prev ? prev.tEnd : 0;
-    const _t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
+    const _t0 = performance.now(); // PERF-МЕТРИКА — НЕ УДАЛЯТЬ
     const level = buildLevel(song);
     const _tLevel = performance.now() - _t0;
     // блокам/трафику даём геометрию ГЛОБАЛЬНОЙ дороги (со сдвигом сегмента), а

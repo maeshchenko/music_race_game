@@ -162,6 +162,19 @@ export class Sfx {
     });
   }
 
+  /**
+   * Смена музыкального слоя: восходящий ран = разблок слоя (награда, #11),
+   * нисходящий = мягкая потеря слоя на срыве (#12). В пентатонике, в ключе.
+   */
+  riser(up: boolean) {
+    const seq = up ? [72, 76, 79, 84, 88] : [88, 84, 79, 76, 72];
+    const now = this.soon();
+    seq.forEach((m, k) => {
+      const s = this.pool[this.next++ % this.pool.length];
+      s.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, now + k * 0.045, up ? 0.45 : 0.3);
+    });
+  }
+
   /** Финал-климакс: глубокий саб-бум (ощутимый «бах»). */
   boom() {
     const now = this.soon();

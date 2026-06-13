@@ -92,6 +92,7 @@ export class Game {
   private goldenUntil = -1; // #18 золотая волна активна до этого времени
   private nextGolden = -1; // когда стартует следующая золотая волна
   private nextNovelty = -1; // #36/#35 когда сменить тему/погоду (новизна против скуки)
+  private lastComboTier = 1; // #11/#12 отслеживаем смену музыкального слоя по комбо
   // #23/#24 микро-цель: короткая задача (10–20с), цель мелкая → полоска почти
   // полна постоянно. Выполнил → бонус + новая. Близкий ясный таргет (СДВГ).
   private goalEl!: HTMLDivElement;
@@ -663,7 +664,7 @@ export class Game {
    * следующий трек уже подхватывает, это дофаминовый пик без разрыва потока.
    */
   private finale(t: number) {
-    const t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
+    const t0 = performance.now(); // PERF-МЕТРИКА — НЕ УДАЛЯТЬ
     // #45 КЛИМАКС: ощутимый слоумо-фриз «прожить пик» + залпы салюта в небо
     // волнами 1.8с + золотая вспышка краёв всего экрана + всплеск блума.
     this.finaleCamT = t;
@@ -1014,8 +1015,18 @@ export class Game {
       // музыкальные слои: первые 4с трека — ВСЕ (интро не молчит, даже если бит
       // ещё не вступил), дальше пол = 1 (chords/counter всегда звучат), arp/fx
       // открывает комбо ≥16. Так старта в тишине не бывает.
-      const tier = this.chain.localSec(t) < 4 ? 2 : (this.combo >= 16 ? 2 : 1);
-      this.chain.setTier(tier);
+      const introFull = this.chain.localSec(t) < 4; // интро не молчит
+      const comboTier = this.combo >= 16 ? 2 : 1; // комбо ≥16 открывает arp/fx
+      this.chain.setTier(introFull ? 2 : comboTier);
+      // #11/#12: слой как СОБЫТИЕ — разблок звучит наградой (ран вверх), потеря
+      // на срыве — мягким спадом (ран вниз), а не резким обрывом
+      if (comboTier > this.lastComboTier) {
+        this.sfx.riser(true);
+        this.pop('🎶 НОВЫЙ СЛОЙ', 'pop-combo');
+      } else if (comboTier < this.lastComboTier) {
+        this.sfx.riser(false);
+      }
+      this.lastComboTier = comboTier;
       // церемония финиша трека: салют + камео, разово на стыке (поток не рвём)
       const seam = this.chain.lastSeamBefore(t);
       if (seam > this.lastSeamT) { this.lastSeamT = seam; this.finale(t); }
@@ -1207,9 +1218,8 @@ export class Game {
 
     // дебаг FPS + скорость раз в секунду (нужен до релиза — НЕ УДАЛЯТЬ)
     if (dt > 0) this.fpsEMA += (1 / dt - this.fpsEMA) * 0.1;
-    // ДИАГНОСТИКА хрипа: логируем только РЕАЛЬНЫЕ столлы (dt зажат 0.05 в loop,
-    // поэтому ≥0.049 = кадр упёрся в потолок ≥50мс). Базовый 30fps headless-среды
-    // не спамим. НЕ УДАЛЯТЬ до решения хрипа.
+    // PERF-МЕТРИКА: реальные столлы главного потока (dt зажат 0.05 → ≥0.049 =
+    // кадр ≥50мс). НЕ УДАЛЯТЬ.
     if (dt >= 0.049 && this.audioStarted && !this.paused) {
       console.warn(`[jank] STALL≥50ms t=${t.toFixed(1)} seamΔ=${(t - this.lastSeamT).toFixed(1)}s`);
     }

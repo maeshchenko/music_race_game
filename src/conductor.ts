@@ -104,7 +104,7 @@ export class Conductor {
     const toTicks = (sec: number) => `${Math.round((startOffsetSec + sec) * this.tps)}i`;
 
     const build = () => {
-      const t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
+      const t0 = performance.now(); // PERF-МЕТРИКА — НЕ УДАЛЯТЬ
       ensemble = buildEnsemble(song);
       console.warn(`[build] ensemble ${(performance.now() - t0).toFixed(1)}ms off=${startOffsetSec.toFixed(1)}`);
       ensemble.ready
