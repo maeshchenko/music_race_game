@@ -38,6 +38,16 @@ const DIFF_LABELS: Record<Difficulty, string> = {
 };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
+
+// ДИАГНОСТИКА хрипа: ловим длинные таски главного потока (>50мс) — именно они
+// глушат планировщик Tone (lookahead ~0.1с) → музыка захлёбывается. НЕ УДАЛЯТЬ.
+try {
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) {
+      console.warn(`[longtask] ${Math.round(e.duration)}ms @${Math.round(e.startTime)}`);
+    }
+  }).observe({ entryTypes: ['longtask'] });
+} catch { /* longtask не поддержан — мимо */ }
 const menu = document.createElement('div');
 menu.className = 'menu';
 menu.innerHTML = SIMPLE_MENU
@@ -391,16 +401,27 @@ function onSegmentDone() {
   segPrevBlocks = game.collected;
   segPrevScore = game.score;
   const earned = Math.round(dScore / 30);
+  // ДИАГНОСТИКА: таймим каждый кусок работы стыка — что блокирует главный поток
+  // (и, как следствие, планировщик Tone → хрип). НЕ УДАЛЯТЬ до решения хрипа.
+  let a = performance.now();
   applyRun({
     blocks: dBlocks, maxCombo: game.maxCombo, magnets: game.magnetsGot,
     mystery: game.mysteryGot, gold: game.goldGot,
     noCrashSec: Math.round(game.noCrashSec), score: dScore,
   }, earned);
-  // глобальный рекорд — живой, без финиша
+  const tApply = performance.now() - a;
+  a = performance.now();
   const best = loadBest();
   if (!best || game.score > best.score) saveBest({ score: game.score, combo: game.maxCombo });
+  const tBest = performance.now() - a;
+  a = performance.now();
   refreshMenuMeta();
+  const tMeta = performance.now() - a;
+  a = performance.now();
   showTicker(`+${earned} ♪ · комбо ×${game.maxCombo} · блоков ${game.collected}`);
+  const tTicker = performance.now() - a;
+  console.warn(`[seam-work] applyRun=${tApply.toFixed(1)}ms saveBest=${tBest.toFixed(1)}ms `
+    + `meta=${tMeta.toFixed(1)}ms ticker=${tTicker.toFixed(1)}ms`);
 }
 
 /** Ненавязчивый тикер сверху — руки не останавливаются (вместо модалки). */

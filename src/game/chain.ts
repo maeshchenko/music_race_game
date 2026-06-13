@@ -27,6 +27,7 @@ export interface Segment {
   blocks: Blocks;
   traffic: Traffic;
   stem: Stem | null; // аудио заводится JIT (~AUDIO_LEAD до нот) и снимается после хвоста
+  stemDone: boolean; // стем уже отыграл и снят — НЕ воскрешать (иначе залп пересборок)
   distOffset: number; // глобальная дистанция начала сегмента, м
   tOffset: number; // глобальное транспортное время начала, сек
   distEnd: number; // distOffset + level.totalDist
@@ -40,9 +41,10 @@ export interface Segment {
 const APPEND_AHEAD = 900;
 // снимаем сегмент, когда машина ушла далеко вперёд и его звук дозвучал
 const RETIRE_BEHIND = 140;
-// аудио заводим только за столько секунд до старта нот трека — перекрытие
-// тяжёлых ансамблей коротко (иначе хрип от 2–3 мастер-цепей разом)
-const AUDIO_LEAD = 8;
+// аудио заводим заранее, «на подъезде» — чтобы ансамбль+reverb-IR успели
+// построиться/прогреться задолго до старта нот, без догрузки на лету (хрип).
+// JIT всё равно держит максимум 2 ансамбля разом (3-й не появляется).
+const AUDIO_LEAD = 16;
 
 export class EndlessChain implements Level {
   // Level-интерфейс: бесконечность — финиша/HUD-таймера в этом режиме нет
@@ -88,7 +90,9 @@ export class EndlessChain implements Level {
     const prev = this.segments[this.segments.length - 1];
     const distOffset = prev ? prev.distEnd : 0;
     const tOffset = prev ? prev.tEnd : 0;
+    const _t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
     const level = buildLevel(song);
+    const _tLevel = performance.now() - _t0;
     // блокам/трафику даём геометрию ГЛОБАЛЬНОЙ дороги (со сдвигом сегмента), а
     // тайминги (distAt/speedAt) — из пер-песенной симуляции. Так позиции блоков
     // ложатся ровно на ту же дорогу, что и машина — без шва.
@@ -98,13 +102,19 @@ export class EndlessChain implements Level {
       curveAt: (d) => this.road.curveAt(distOffset + d),
       heightAt: (d) => this.road.heightAt(distOffset + d),
     };
+    const _tb = performance.now();
     const blocks = new Blocks(song, geoLevel, this.diff, this.extras());
+    const _tBlocks = performance.now() - _tb;
+    const _tt = performance.now();
     const traffic = new Traffic(geoLevel, blocks, this.diff);
+    const _tTraffic = performance.now() - _tt;
+    console.warn(`[append] level=${_tLevel.toFixed(1)}ms blocks=${_tBlocks.toFixed(1)}ms `
+      + `traffic=${_tTraffic.toFixed(1)}ms total=${(performance.now() - _t0).toFixed(1)}ms`);
     blocks.mesh.position.z = -distOffset; // сдвиг сегмента в мир по дистанции
     traffic.root.position.z = -distOffset;
     this.scene.add(blocks.mesh, traffic.root);
     const seg: Segment = {
-      song, level, geoLevel, blocks, traffic, stem: null, // аудио — JIT в update()
+      song, level, geoLevel, blocks, traffic, stem: null, stemDone: false, // аудио — JIT в update()
       distOffset, tOffset,
       // distEnd = ровно distAt(durationSec), а не totalDist (sArr[last]): иначе
       // на стыке стык дистанций расходится на ~2 м (off-by-one сэмплера) → лёгкий рывок
@@ -139,13 +149,16 @@ export class EndlessChain implements Level {
     }
     for (const seg of this.segments) {
       if (seg.retired) continue;
-      // АУДИО заводим поздно (JIT): ансамбли тяжёлые, держим перекрытие коротким —
-      // иначе 2–3 мастер-цепи (компрессор/лимитер/реверб) разом → хрип/перегруз
-      if (!seg.stem && seg.tOffset - globalT < AUDIO_LEAD && globalT < seg.tEnd + 2) {
+      // АУДИО заводим РОВНО раз, заранее (JIT), только для ПРЕДСТОЯЩЕГО сегмента.
+      // !stemDone — не воскрешать отыгравший (иначе на стыке шёл залп пересборок
+      // ансамбля → ~200мс фризы → планировщик Tone глох → хрип).
+      if (!seg.stem && !seg.stemDone && seg.tOffset - globalT < AUDIO_LEAD && globalT < seg.tOffset + 1) {
         this.ensureStem(seg);
       }
-      // снять аудио сразу после хвоста — освободить CPU
-      if (seg.stem && globalT > seg.stem.endSec) { seg.stem.retire(); seg.stem = null; }
+      // снять аудио сразу после хвоста — освободить CPU, пометить как отыгравший
+      if (seg.stem && globalT > seg.stem.endSec) {
+        seg.stem.retire(); seg.stem = null; seg.stemDone = true;
+      }
       // снять отъехавшую геометрию (машина далеко впереди)
       if (seg.distEnd < globalDist - RETIRE_BEHIND && seg !== last) {
         seg.retired = true;
@@ -154,6 +167,7 @@ export class EndlessChain implements Level {
         seg.traffic.dispose();
         seg.stem?.retire();
         seg.stem = null;
+        seg.stemDone = true;
         this.onSegmentDone?.(seg);
       }
     }

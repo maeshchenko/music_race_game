@@ -34,8 +34,50 @@ export interface Stem {
   retire(): void;
 }
 
+const BASE_BPM = 120; // номинальный темп транспорта; турбо поднимает его (time-stretch)
+
+// --- кэш reverb-IR: каждый Tone.Reverb рендерит свой impulse через OfflineContext
+// (~150мс главного потока). Для одинаковых decay/preDelay IR идентичен, но
+// midi-движок плодит новый Reverb на каждый трек → повторный рендер = фриз →
+// планировщик Tone глохнет → хрип на стыке. Патчим generate() ОДИН раз: при
+// совпадении параметров переиспользуем готовый AudioBuffer (он иммутабелен,
+// делится между ConvolverNode безопасно). Делаем в нашем коде, не в vendor —
+// переживает пересинк midi-gen. Защищено try/catch: при иных внутренностях Tone
+// падаем на оригинал.
+(() => {
+  type RevProto = { generate: () => Promise<unknown> };
+  const proto = (Tone as unknown as { Reverb?: { prototype: RevProto } }).Reverb?.prototype;
+  if (!proto || (proto as { __irCached?: boolean }).__irCached) return;
+  const orig = proto.generate;
+  const cache = new Map<string, AudioBuffer>();
+  proto.generate = function (this: Record<string, unknown>) {
+    try {
+      const conv = this._convolver as ConvolverNode | undefined;
+      const ctx = this.context as { sampleRate?: number } | undefined;
+      const key = `${this._decay}_${this._preDelay}_${ctx?.sampleRate}`;
+      const hit = cache.get(key);
+      if (conv && hit) {
+        conv.buffer = hit;
+        (this as { ready?: Promise<unknown> }).ready = Promise.resolve();
+        return Promise.resolve(this);
+      }
+      return (orig.call(this) as Promise<unknown>).then((r) => {
+        try { if (conv?.buffer) cache.set(key, conv.buffer); } catch { /* мимо */ }
+        return r;
+      });
+    } catch {
+      return orig.call(this); // внутренности Tone иные — на оригинал
+    }
+  };
+  (proto as { __irCached?: boolean }).__irCached = true;
+})();
+
 export class Conductor {
   private transport = Tone.getTransport();
+  // тиков на «песенную секунду» при базовом темпе. Часы/планирование ведём в
+  // ТИКАХ (инвариант к темпу): подъём bpm ускоряет тики → музыка, блоки и машина
+  // синхронно ускоряются, питч нот не меняется (высота задаётся отдельно).
+  private tps = this.transport.PPQ * BASE_BPM / 60;
   private latCache = 0;
   private latCalls = 0;
   private started = false;
@@ -56,16 +98,26 @@ export class Conductor {
     } = { parts, autoIds, ensemble };
     this.stems.add(rec);
 
+    // песенные секунды → абсолютные тики транспорта (от базового темпа).
+    // планируем в тиках, чтобы момент срабатывания НЕ зависел от текущего bpm
+    // (иначе JIT-стем, заведённый во время турбо, рассинхронился бы)
+    const toTicks = (sec: number) => `${Math.round((startOffsetSec + sec) * this.tps)}i`;
+
     const build = () => {
+      const t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
       ensemble = buildEnsemble(song);
+      console.warn(`[build] ensemble ${(performance.now() - t0).toFixed(1)}ms off=${startOffsetSec.toFixed(1)}`);
+      ensemble.ready
+        .then(() => console.warn(`[build] IR ready off=${startOffsetSec.toFixed(1)}`))
+        .catch(() => { /* мимо */ });
       rec.ensemble = ensemble;
       parts = song.tracks.map((track, i) => {
         const voice = ensemble!.voices[i];
         const roleTier = ROLE_TIER[track.role] ?? 0;
         const events = track.notes.map((n) => ({
-          time: n.start * secPerTick,
+          time: toTicks(n.start * secPerTick), // абсолютный тик ноты
           pitch: n.pitch,
-          dur: Math.max(0.02, n.dur * secPerTick),
+          dur: Math.max(0.02, n.dur * secPerTick), // длительность в реальных секундах
           vel: n.vel / 127,
           slide: n.slide,
         }));
@@ -73,12 +125,12 @@ export class Conductor {
           if (roleTier > tier) return; // слой ещё не открыт комбо
           voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
         }, events);
-        part.start(startOffsetSec); // ноты звучат со сдвига этого трека
+        part.start(0); // времена событий абсолютные (в тиках) → старт с тика 0
         return part;
       });
       rec.parts = parts;
       autoIds = ensemble.automations.map((a) =>
-        this.transport.schedule((t) => a.apply(t), startOffsetSec + a.time));
+        this.transport.schedule((t) => a.apply(t), toTicks(a.time)));
       // анти-клип на стыке: новый трек стартует на полную поверх реверб-хвоста
       // прошлого → сумма клиппит = хрип. Кратко придушиваем мастер в момент
       // старта (сайдчейн-дак), восстанавливаем за ~1.2 с. Первый трек (offset 0)
@@ -91,7 +143,7 @@ export class Conductor {
           v.setValueAtTime(base, time);
           v.linearRampToValueAtTime(base - 6, time + 0.04);
           v.linearRampToValueAtTime(base, time + 1.2);
-        }, startOffsetSec));
+        }, toTicks(0)));
       }
       rec.autoIds = autoIds;
     };
@@ -119,6 +171,7 @@ export class Conductor {
     await Tone.start();
     if (this.started) return;
     this.started = true;
+    this.transport.bpm.value = BASE_BPM; // базовый темп — турбо поднимает его
     this.transport.loop = false;
     this.transport.start();
   }
@@ -127,7 +180,19 @@ export class Conductor {
   resume() { this.transport.start(); }
   isPlaying() { return this.transport.state === 'started'; }
 
-  /** Глобальная позиция (сек) с поправкой на latency — клок никогда не сбрасывается. */
+  /**
+   * Турбо: множитель темпа (1 — норма). Поднимает bpm → тики идут быстрее →
+   * музыка/блоки/машина синхронно ускоряются, питч тот же. Плавный рамп.
+   */
+  setRate(rate: number) {
+    this.transport.bpm.rampTo(BASE_BPM * rate, 0.3);
+  }
+
+  /**
+   * Глобальная позиция в ПЕСЕННЫХ секундах (тики/tps) — инвариант к темпу:
+   * под турбо тики идут быстрее, песенное время растёт быстрее, всё синхронно.
+   * Клок никогда не сбрасывается. Латентность вычитаем приближённо.
+   */
   positionSec(): number {
     const ctx = Tone.getContext();
     const raw = ctx.rawContext as AudioContext;
@@ -135,7 +200,7 @@ export class Conductor {
     if (this.latCalls++ % 30 === 0) {
       this.latCache = ctx.lookAhead + (raw.outputLatency || raw.baseLatency || 0);
     }
-    return Math.max(0, this.transport.seconds - this.latCache);
+    return Math.max(0, this.transport.ticks / this.tps - this.latCache);
   }
 
   dispose() {

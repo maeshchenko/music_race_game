@@ -43,6 +43,7 @@ export class Game {
   private blocks!: Blocks; // одиночный трек; в endless блоки живут в chain
   private traffic!: Traffic;
   private chain: EndlessChain | null = null;
+  private conductor: Conductor | null = null; // endless: для турбо-рампа темпа
   private endless = false;
   private posSource!: { positionSec(): number; isPlaying(): boolean };
   private invulnUntil = -1; // после удара — 1.5 с неуязвимости
@@ -171,6 +172,7 @@ export class Game {
       // бесконечный сет: цепочка сегментов владеет блоками/трафиком и аудио;
       // scene уже создана миром → можно подвесить первый сегмент сразу
       this.posSource = endlessOpts.conductor;
+      this.conductor = endlessOpts.conductor;
       this.chain = new EndlessChain(
         this.world.scene, endlessOpts.conductor, diff, endlessOpts.nextSong,
       );
@@ -261,7 +263,7 @@ export class Game {
     container.appendChild(this.odBar);
     this.odIcon = document.createElement('div');
     this.odIcon.className = 'od-icon';
-    this.odIcon.textContent = '⚡ ЗАКИСЬ АЗОТА';
+    this.odIcon.textContent = IS_MOBILE ? '⚡ ЗАКИСЬ АЗОТА' : '⚡ ЗАКИСЬ АЗОТА (ЛКМ)';
     container.appendChild(this.odIcon);
     this.odPrompt = document.createElement('div');
     this.odPrompt.className = 'od-prompt';
@@ -582,11 +584,13 @@ export class Game {
    * следующий трек уже подхватывает, это дофаминовый пик без разрыва потока.
    */
   private finale(t: number) {
+    const t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
     this.celebrate(); // 3 волны золотых искр + вспышка + джекпот-арпеджио
     this.pop('🏁 ТРЕК ПРОЙДЕН!', 'pop-combo pop-mega');
     this.finaleCamT = t;
     this.shake = Math.max(this.shake, 0.5);
     this.onSegment?.(); // тикер + ноты/XP за пройденный трек
+    console.warn(`[finale] total ${(performance.now() - t0).toFixed(1)}ms @t=${t.toFixed(1)}`);
   }
 
   private onMouse = (e: MouseEvent) => {
@@ -706,16 +710,19 @@ export class Game {
     if (wantNos !== this.nosActive) {
       this.nosActive = wantNos;
       if (wantNos) {
-        this.sfx.turboStart();
+        this.conductor?.setRate(1.1); // РЕАЛЬНЫЙ разгон: темп+блоки+машина ×1.1
         this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
         this.flash('#ffd24d');
         this.shake = Math.min(0.6, this.shake + 0.4);
-      } else this.sfx.turboStop();
+      } else {
+        this.conductor?.setRate(1); // вернуть базовый темп
+      }
     }
     if (this.nosActive) {
       this.energy = Math.max(0, this.energy - dt / 6); // полный бак ≈ 6 с удержания
       if (this.energy <= 0) {
-        this.nosActive = false; this.sfx.turboStop();
+        this.nosActive = false;
+        this.conductor?.setRate(1);
         if (IS_MOBILE) this.nosHeld = false;
       }
     }
@@ -906,6 +913,7 @@ export class Game {
       } else {
         this.missStreak = 0;
         this.breakCombo();
+        this.energy = 0; // авария жжёт и закись, не только кольцо
         this.score = Math.max(0, this.score - 50);
         this.sfx.crash();
         this.pop('💥', 'pop-combo pop-crash');
@@ -929,7 +937,8 @@ export class Game {
       this.shake = Math.max(this.shake, 0.5);
     }
 
-    const kmh = Math.round(this.level.speedAt(t) * 3.6);
+    // реальная скорость выше на множитель турбо (время трека идёт быстрее)
+    const kmh = Math.round(this.level.speedAt(t) * 3.6 * (1 + 0.1 * this.nosVis));
     // HUD и комбо-полоса — ~15 Гц: на глаз неотличимо, но вчетверо меньше
     // сборки строк и DOM-записей (счёт «вздрагивает» отдельно в scoreBump)
     this.hudAcc += dt;
@@ -967,8 +976,9 @@ export class Game {
       this.odBar.classList.toggle('active', od);
       this.odIcon.classList.toggle('on', od || this.energy > 0.02);
       this.odIcon.classList.toggle('hot', ready || od);
-      this.odPrompt.classList.toggle('on', ready || od);
-      this.odPrompt.textContent = od ? '⚡ ТУРБО!' : (IS_MOBILE ? '⚡ ЗАКИСЬ ГОТОВА' : '⚡ ДЕРЖИ — ЗАКИСЬ ГОТОВА');
+      // подсказку готовности не показываем (бесит) — только «ТУРБО!» при активе
+      this.odPrompt.classList.toggle('on', od);
+      if (od) this.odPrompt.textContent = '⚡ ТУРБО!';
       // блюр скорости по краям: радиус растёт с интенсивностью турбо
       this.turboFx.style.opacity = this.nosVis > 0.02 ? '1' : '0';
       this.turboFx.style.setProperty('--tb', `${(this.nosVis * 7).toFixed(1)}px`);
@@ -1015,6 +1025,12 @@ export class Game {
 
     // дебаг FPS + скорость раз в секунду (нужен до релиза — НЕ УДАЛЯТЬ)
     if (dt > 0) this.fpsEMA += (1 / dt - this.fpsEMA) * 0.1;
+    // ДИАГНОСТИКА хрипа: логируем только РЕАЛЬНЫЕ столлы (dt зажат 0.05 в loop,
+    // поэтому ≥0.049 = кадр упёрся в потолок ≥50мс). Базовый 30fps headless-среды
+    // не спамим. НЕ УДАЛЯТЬ до решения хрипа.
+    if (dt >= 0.049 && this.audioStarted && !this.paused) {
+      console.warn(`[jank] STALL≥50ms t=${t.toFixed(1)} seamΔ=${(t - this.lastSeamT).toFixed(1)}s`);
+    }
 
     // авто-деградация: FPS<45 ~2с подряд → ниже качество; FPS>55 ~4с → вернуть
     if (!this.paused && !this.finished) {
@@ -1044,7 +1060,6 @@ export class Game {
     this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
     removeEventListener('mouseup', this.onMouseUp);
     removeEventListener('keyup', this.onKeyUp);
-    this.sfx.turboStop();
     if (this.pointerLocked) document.exitPointerLock();
     if (this.endless && this.chain) this.chain.dispose();
     else { this.blocks.dispose(); this.traffic.dispose(); }
