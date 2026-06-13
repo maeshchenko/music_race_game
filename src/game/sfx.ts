@@ -21,6 +21,11 @@ export class Sfx {
   private snare: Tone.NoiseSynth; // щелчок бэкбита
   private lastKickAt = 0;
   private lastSnareAt = 0;
+  // турбо (закись азота): пламя/шум, тянется пока держишь кнопку
+  private turboNoise: Tone.Noise;
+  private turboFilter: Tone.Filter;
+  private turboGain: Tone.Gain;
+  private turboTarget = 0.32;
 
   /**
    * Низколатентное время сбора. Контекст игры — latencyHint:'playback' (большой
@@ -48,6 +53,7 @@ export class Sfx {
     this.kick.volume.value = -8 + db;
     this.bass.volume.value = -15 + db;
     this.snare.volume.value = -18 + db;
+    this.turboTarget = 0.32 * Math.pow(10, db / 20); // турбо следует ползунку эффектов
   }
 
   constructor() {
@@ -80,6 +86,37 @@ export class Sfx {
       envelope: { attack: 0.001, decay: 0.07, sustain: 0, release: 0.02 },
       volume: -18,
     }).toDestination();
+    // турбо: розовый шум сквозь резонансный фильтр = рёв пламени/реактива.
+    // тянется постоянно, слышен только когда turboGain поднят (держишь кнопку)
+    this.turboGain = new Tone.Gain(0).toDestination();
+    this.turboFilter = new Tone.Filter({ frequency: 760, type: 'lowpass', Q: 2.4 });
+    this.turboFilter.connect(this.turboGain);
+    this.turboNoise = new Tone.Noise('pink');
+    this.turboNoise.connect(this.turboFilter);
+    this.turboNoise.start();
+  }
+
+  /** Турбо включён: рёв нарастает + свуш фильтра вверх (поджиг). */
+  turboStart() {
+    const now = this.soon();
+    const g = this.turboGain.gain;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(this.turboTarget, now + 0.06);
+    const f = this.turboFilter.frequency;
+    f.cancelScheduledValues(now);
+    f.setValueAtTime(340, now);
+    f.exponentialRampToValueAtTime(1600, now + 0.22);
+    f.exponentialRampToValueAtTime(820, now + 0.9);
+  }
+
+  /** Турбо отпущен: рёв гаснет. */
+  turboStop() {
+    const now = this.soon();
+    const g = this.turboGain.gain;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(0, now + 0.18);
   }
 
   /** Один тональный «дзынь» из пула (round-robin), velocity 0..1. */
@@ -173,5 +210,8 @@ export class Sfx {
     this.kick.dispose();
     this.bass.dispose();
     this.snare.dispose();
+    this.turboNoise.dispose();
+    this.turboFilter.dispose();
+    this.turboGain.dispose();
   }
 }

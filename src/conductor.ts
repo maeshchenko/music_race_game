@@ -79,6 +79,20 @@ export class Conductor {
       rec.parts = parts;
       autoIds = ensemble.automations.map((a) =>
         this.transport.schedule((t) => a.apply(t), startOffsetSec + a.time));
+      // анти-клип на стыке: новый трек стартует на полную поверх реверб-хвоста
+      // прошлого → сумма клиппит = хрип. Кратко придушиваем мастер в момент
+      // старта (сайдчейн-дак), восстанавливаем за ~1.2 с. Первый трек (offset 0)
+      // не душим — хвоста ещё нет.
+      if (startOffsetSec > 0.5) {
+        autoIds.push(this.transport.scheduleOnce((time) => {
+          const v = Tone.getDestination().volume;
+          const base = v.value;
+          v.cancelScheduledValues(time);
+          v.setValueAtTime(base, time);
+          v.linearRampToValueAtTime(base - 6, time + 0.04);
+          v.linearRampToValueAtTime(base, time + 1.2);
+        }, startOffsetSec));
+      }
       rec.autoIds = autoIds;
     };
     build();

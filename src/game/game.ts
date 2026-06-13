@@ -54,6 +54,22 @@ export class Game {
   private feverEdge: HTMLDivElement;
   private comboBar: HTMLDivElement;
   private comboBarFill: HTMLDivElement;
+  // #20 комбо-кольцо + #19 овердрайв (Zone: банк энергии → разрядка)
+  private comboRingWrap!: HTMLDivElement;
+  private comboRing!: HTMLDivElement;
+  private comboRingLabel!: HTMLDivElement;
+  private odBar!: HTMLDivElement;
+  private odFill!: HTMLDivElement;
+  private odIcon!: HTMLDivElement;
+  private odPrompt!: HTMLDivElement;
+  private turboFx!: HTMLDivElement; // оверлей скоростных полос/размытия
+  private feverEdgeCls = '';
+  // турбо «закись азота»: бак копится сбором, тратится ПОКА ДЕРЖИШЬ кнопку
+  private energy = 0; // 0..1 бак закиси
+  private nosHeld = false; // кнопка турбо зажата
+  private nosActive = false; // турбо реально работает (зажата + есть заряд)
+  private nosVis = 0; // сглаженная визуальная интенсивность 0..1
+  private get overdrive() { return this.nosActive; } // ×2 очки/магнит/края — пока активно
   private pointerLocked = false;
   score = 0;
   combo = 0;
@@ -229,6 +245,31 @@ export class Game {
     this.comboBarFill = document.createElement('div');
     this.comboBar.appendChild(this.comboBarFill);
     container.appendChild(this.comboBar);
+    // комбо-кольцо у машины + банк овердрайва под ним
+    this.comboRingWrap = document.createElement('div');
+    this.comboRingWrap.className = 'combo-ring-wrap';
+    this.comboRing = document.createElement('div');
+    this.comboRing.className = 'combo-ring';
+    this.comboRingLabel = document.createElement('div');
+    this.comboRingLabel.className = 'combo-ring-label';
+    this.comboRingWrap.append(this.comboRing, this.comboRingLabel);
+    container.appendChild(this.comboRingWrap);
+    this.odBar = document.createElement('div');
+    this.odBar.className = 'od-bar';
+    this.odFill = document.createElement('div');
+    this.odBar.appendChild(this.odFill);
+    container.appendChild(this.odBar);
+    this.odIcon = document.createElement('div');
+    this.odIcon.className = 'od-icon';
+    this.odIcon.textContent = '⚡ ЗАКИСЬ АЗОТА';
+    container.appendChild(this.odIcon);
+    this.odPrompt = document.createElement('div');
+    this.odPrompt.className = 'od-prompt';
+    container.appendChild(this.odPrompt);
+    // оверлей скоростных полос/размытия — включается на турбо
+    this.turboFx = document.createElement('div');
+    this.turboFx.className = 'turbo-fx';
+    container.appendChild(this.turboFx);
 
     this.world.scene.add(this.car);
 
@@ -237,6 +278,9 @@ export class Game {
     addEventListener('keydown', this.onKey);
     document.addEventListener('pointerlockchange', this.onLockChange);
     this.renderer.domElement.addEventListener('click', this.grabPointer);
+    this.renderer.domElement.addEventListener('mousedown', this.onMouseDown);
+    addEventListener('mouseup', this.onMouseUp);
+    addEventListener('keyup', this.onKeyUp);
     // палец = руль: абсолютная позиция по ширине экрана
     this.renderer.domElement.addEventListener('touchstart', this.onTouch, { passive: false });
     this.renderer.domElement.addEventListener('touchmove', this.onTouch, { passive: false });
@@ -265,7 +309,15 @@ export class Game {
     if (this.pointerLocked) document.exitPointerLock();
   }
 
+  // турбо «закись азота» — HOLD: зажал → тратится и ускоряет, отпустил → стоп
+  private onMouseDown = (e: MouseEvent) => { if (e.button === 0) this.nosHeld = true; };
+  private onMouseUp = () => { this.nosHeld = false; };
+  private onKeyUp = (e: KeyboardEvent) => {
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE') this.nosHeld = false;
+  };
+
   private onKey = (e: KeyboardEvent) => {
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE') this.nosHeld = true;
     if (e.code === 'KeyC') this.firstPerson = !this.firstPerson; // физ. клавиша — любая раскладка
     if (e.code === 'Digit0' || e.code === 'Numpad0') {
       // перебор тем оформления на лету — посмотреть снег/дождь/рассвет/закат
@@ -324,17 +376,12 @@ export class Game {
 
   /**
    * Срыв: падение на предыдущую веху (x30 → x20), не в ноль — качели
-   * «всё-или-ничего» выбивают из потока. Fever гаснет, только если комбо
-   * упало ниже порога.
+   * полный сброс комбо в ноль (кольцо обнуляется, fever гаснет). Одиночный
+   * промах прощается (см. missLimit) — сбрасывает только лимит промахов или
+   * авария, чтобы у множителя были реальные ставки.
    */
   private breakCombo() {
-    if (this.combo > 50) {
-      this.combo = 50 + Math.floor((this.combo - 1 - 50) / 25) * 25;
-    } else {
-      let down = 0;
-      for (const m of [5, 10, 15, 20, 30, 50]) if (m < this.combo) down = m;
-      this.combo = down;
-    }
+    this.combo = 0;
     this.syncFever();
   }
 
@@ -354,14 +401,13 @@ export class Game {
       this.flash('#ff44ff');
       this.shake = Math.max(this.shake, 0.6);
     } else this.feverLevel = lvl;
-    this.feverEdge.className = `fever-edge${lvl ? ` on lvl${lvl}` : ''}`;
-    // пре-fever разогрев: x10–14 — края тлеют всё ярче
-    this.feverEdge.style.opacity =
-      lvl === 0 && this.combo >= 10 ? String(((this.combo - 9) / 6) * 0.5) : '';
-    // музыкальные слои: база / +chords·counter (x8) / всё (x16)
-    const tier = this.combo >= 16 ? 2 : this.combo >= 8 ? 1 : 0;
-    if (this.endless && this.chain) this.chain.setTier(tier);
-    else (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
+    // края экрана (fever/overdrive/пре-fever) обновляются централизованно в HUD-тике
+    // музыкальные слои: в endless тир ведётся в tick (интро не молчит); для
+    // одиночного трека — по комбо: база / +chords·counter (x8) / всё (x16)
+    if (!this.endless) {
+      const tier = this.combo >= 16 ? 2 : this.combo >= 8 ? 1 : 0;
+      (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
+    }
   }
 
   /**
@@ -402,6 +448,7 @@ export class Game {
       this.shake = Math.min(0.6, this.shake + 0.5);
       this.hitStop = 0.07;
       this.sfx.jackpot();
+      if (!this.overdrive) this.energy = Math.min(1.2, this.energy + 0.06);
       this.scoreBump();
       return;
     }
@@ -428,6 +475,7 @@ export class Game {
       this.particles.burst(b.x, b.y, wz, C_WHITE, 50);
       this.shake = Math.min(0.5, this.shake + 0.3);
       this.sfx.mystery();
+      if (!this.overdrive) this.energy = Math.min(1.2, this.energy + 0.05);
       this.scoreBump();
       return;
     }
@@ -440,11 +488,14 @@ export class Game {
     if (perfect) this.perfects++;
     const grade = perfect ? 1.2 : 1;
     const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
+    const od = this.overdrive ? 2 : 1; // овердрайв ×2 поверх всего
     const pts = Math.round(
       (10 + (b.vel / 127) * 10) * b.count *
-      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl,
+      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl * od,
     );
     this.score += pts;
+    // банк овердрайва копится сбором (не во время самого овердрайва)
+    if (!this.overdrive) this.energy = Math.min(1.2, this.energy + (perfect ? 0.02 : 0.012));
     this.sfx.collect(this.combo, this.fever, b.count, b.beatType, b.voice, b.pitch, perfect);
     this.scoreBump();
     const milestone = this.popFx();
@@ -648,6 +699,27 @@ export class Game {
       }
     }
     const t = Math.max(0, this.tEst + this.audioOffset);
+    // турбо «закись азота»: держишь кнопку → тратится бак и врубается визуал
+    // скорости. Мобайл — авто при полном баке (нет второй руки на удержание).
+    if (IS_MOBILE && this.energy >= 1) this.nosHeld = true;
+    const wantNos = this.nosHeld && this.energy > 0.02 && !this.paused;
+    if (wantNos !== this.nosActive) {
+      this.nosActive = wantNos;
+      if (wantNos) {
+        this.sfx.turboStart();
+        this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
+        this.flash('#ffd24d');
+        this.shake = Math.min(0.6, this.shake + 0.4);
+      } else this.sfx.turboStop();
+    }
+    if (this.nosActive) {
+      this.energy = Math.max(0, this.energy - dt / 6); // полный бак ≈ 6 с удержания
+      if (this.energy <= 0) {
+        this.nosActive = false; this.sfx.turboStop();
+        if (IS_MOBILE) this.nosHeld = false;
+      }
+    }
+    this.nosVis += ((this.nosActive ? 1 : 0) - this.nosVis) * Math.min(1, dt * 8);
 
     // конец трека → фаза наката: своя интеграция вместо distAt
     if (!this.finished && t >= this.level.durationSec - 0.03) {
@@ -759,10 +831,21 @@ export class Game {
         this.camera.position.y += 4 * env; // и вверх
       }
     }
+    // турбо: лёгкий сдвиг камеры (≈1 м назад, ≈3° вверх) + чуть FOV — ощущение
+    // разгона дают в основном скоростные полосы/блум/блюр, а не «отъезд»
+    if (this.nosVis > 0.01) {
+      this.camera.position.z += 0.12 * this.nosVis;
+      this.camera.position.y -= 0.08 * this.nosVis; // чуть НИЖЕ обычного (~0.5° вниз)
+    }
+    const fov = 62 + 0.6 * this.nosVis;
+    if (Math.abs(fov - this.camera.fov) > 0.1) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
     this.particles.update(dt);
 
-    // блоки: сбор по позиции машины (+притяжение при активном магните)
-    const magnetActive = t < this.magnetUntil;
+    // блоки: сбор по позиции машины (+притяжение при магните или турбо)
+    const magnetActive = t < this.magnetUntil || this.nosActive;
     const carWorldX = cx + this.carX;
     type ObsHit = ReturnType<Traffic['update']>['collided'];
     let hitObs: ObsHit = null;
@@ -771,6 +854,11 @@ export class Game {
       // бесконечный сет: подвесить/снять сегменты и обойти активные. Каждый
       // сегмент сдвинут по дистанции/времени — кормим его локальными координатами
       this.chain.update(dist, t);
+      // музыкальные слои: первые 4с трека — ВСЕ (интро не молчит, даже если бит
+      // ещё не вступил), дальше пол = 1 (chords/counter всегда звучат), arp/fx
+      // открывает комбо ≥16. Так старта в тишине не бывает.
+      const tier = this.chain.localSec(t) < 4 ? 2 : (this.combo >= 16 ? 2 : 1);
+      this.chain.setTier(tier);
       // церемония финиша трека: салют + камео, разово на стыке (поток не рвём)
       const seam = this.chain.lastSeamBefore(t);
       if (seam > this.lastSeamT) { this.lastSeamT = seam; this.finale(t); }
@@ -858,6 +946,40 @@ export class Game {
       }
       this.comboBarFill.style.width = `${((this.combo - lo) / (hi - lo)) * 100}%`;
 
+      // #20 комбо-кольцо: заполнение до вехи, цвет/центр по fever+овердрайву
+      const od = this.overdrive;
+      const mult = (1 + this.feverLevel) * (od ? 2 : 1);
+      const ringC = od ? '#ffd24d'
+        : this.feverLevel >= 3 ? '#ff8a3c'
+        : this.feverLevel >= 2 ? '#ff44ff'
+        : this.feverLevel >= 1 ? '#c14dff' : '#22ffee';
+      this.comboRing.style.setProperty('--rp', String(Math.round(((this.combo - lo) / (hi - lo)) * 100)));
+      this.comboRing.style.setProperty('--rc', ringC);
+      this.comboRingLabel.textContent = mult > 1 ? `×${mult}` : (this.combo > 1 ? String(this.combo) : '');
+      this.comboRingWrap.classList.toggle('on', this.combo > 1 || this.feverLevel > 0 || od);
+
+      // #19 турбо «закись азота»: бак показывает заряд (тратится в реале, пока
+      // держишь). Икона ⚡, подсветка готовности, текст-подсказка, оверлей полос.
+      const ready = this.energy >= 1 && !od;
+      this.odFill.style.width = `${Math.min(100, this.energy * 100)}%`;
+      this.odBar.classList.toggle('on', od || this.energy > 0.02);
+      this.odBar.classList.toggle('ready', ready);
+      this.odBar.classList.toggle('active', od);
+      this.odIcon.classList.toggle('on', od || this.energy > 0.02);
+      this.odIcon.classList.toggle('hot', ready || od);
+      this.odPrompt.classList.toggle('on', ready || od);
+      this.odPrompt.textContent = od ? '⚡ ТУРБО!' : (IS_MOBILE ? '⚡ ЗАКИСЬ ГОТОВА' : '⚡ ДЕРЖИ — ЗАКИСЬ ГОТОВА');
+      // блюр скорости по краям: радиус растёт с интенсивностью турбо
+      this.turboFx.style.opacity = this.nosVis > 0.02 ? '1' : '0';
+      this.turboFx.style.setProperty('--tb', `${(this.nosVis * 7).toFixed(1)}px`);
+
+      // #19/fever: края экрана централизованно (овердрайв > fever > пре-fever)
+      const edge = od ? 'fever-edge on overdrive'
+        : this.feverLevel ? `fever-edge on lvl${this.feverLevel}` : 'fever-edge';
+      if (edge !== this.feverEdgeCls) { this.feverEdge.className = edge; this.feverEdgeCls = edge; }
+      this.feverEdge.style.opacity =
+        (!od && this.feverLevel === 0 && this.combo >= 10) ? String(((this.combo - 9) / 6) * 0.5) : '';
+
       let recPart = '';
       if (this.bestScore > 0 && !this.finished) {
         recPart = this.score > this.bestScore
@@ -866,6 +988,7 @@ export class Game {
       }
       const hud =
         `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
+        `${this.nosActive ? ' · ⚡ТУРБО' : ''}` +
         `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
         `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
         `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
@@ -882,7 +1005,7 @@ export class Game {
     if (this.bloomPass && !this.paused) {
       const phase = (t * this.bpm / 60) % 1;
       const env = Math.max(0, 1 - phase * 3.2);
-      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35);
+      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35) + this.nosVis * 0.55;
       if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }
 
@@ -918,6 +1041,10 @@ export class Game {
     document.removeEventListener('pointerlockchange', this.onLockChange);
     this.renderer.domElement.removeEventListener('touchstart', this.onTouch);
     this.renderer.domElement.removeEventListener('touchmove', this.onTouch);
+    this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
+    removeEventListener('mouseup', this.onMouseUp);
+    removeEventListener('keyup', this.onKeyUp);
+    this.sfx.turboStop();
     if (this.pointerLocked) document.exitPointerLock();
     if (this.endless && this.chain) this.chain.dispose();
     else { this.blocks.dispose(); this.traffic.dispose(); }
@@ -931,5 +1058,10 @@ export class Game {
     this.fx.remove();
     this.feverEdge.remove();
     this.comboBar.remove();
+    this.comboRingWrap.remove();
+    this.odBar.remove();
+    this.odIcon.remove();
+    this.odPrompt.remove();
+    this.turboFx.remove();
   }
 }

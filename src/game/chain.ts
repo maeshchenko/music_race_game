@@ -26,7 +26,7 @@ export interface Segment {
   geoLevel: Level; // геометрия глобальной дороги (для рантайм-позиций трафика)
   blocks: Blocks;
   traffic: Traffic;
-  stem: Stem;
+  stem: Stem | null; // аудио заводится JIT (~AUDIO_LEAD до нот) и снимается после хвоста
   distOffset: number; // глобальная дистанция начала сегмента, м
   tOffset: number; // глобальное транспортное время начала, сек
   distEnd: number; // distOffset + level.totalDist
@@ -40,6 +40,9 @@ export interface Segment {
 const APPEND_AHEAD = 900;
 // снимаем сегмент, когда машина ушла далеко вперёд и его звук дозвучал
 const RETIRE_BEHIND = 140;
+// аудио заводим только за столько секунд до старта нот трека — перекрытие
+// тяжёлых ансамблей коротко (иначе хрип от 2–3 мастер-цепей разом)
+const AUDIO_LEAD = 8;
 
 export class EndlessChain implements Level {
   // Level-интерфейс: бесконечность — финиша/HUD-таймера в этом режиме нет
@@ -61,9 +64,18 @@ export class EndlessChain implements Level {
     private nextSong: () => Promise<Song>,
   ) {}
 
-  /** Первый сегмент — синхронно из уже сгенерированного трека. */
+  /** Первый сегмент — синхронно, аудио сразу (нужно до старта транспорта). */
   pushFirst(song: Song): Segment {
-    return this.append(song);
+    const seg = this.append(song);
+    this.ensureStem(seg);
+    return seg;
+  }
+
+  /** Создать аудио-стем сегмента (just-in-time, ~AUDIO_LEAD до его нот). */
+  private ensureStem(seg: Segment) {
+    if (seg.stem) return;
+    seg.stem = this.conductor.addStem(seg.song, seg.tOffset);
+    seg.stem.ready().catch(() => { /* IR не успел — мимо, дозвучит */ });
   }
 
   private extras(): BlockExtras {
@@ -91,9 +103,8 @@ export class EndlessChain implements Level {
     blocks.mesh.position.z = -distOffset; // сдвиг сегмента в мир по дистанции
     traffic.root.position.z = -distOffset;
     this.scene.add(blocks.mesh, traffic.root);
-    const stem = this.conductor.addStem(song, tOffset);
     const seg: Segment = {
-      song, level, geoLevel, blocks, traffic, stem,
+      song, level, geoLevel, blocks, traffic, stem: null, // аудио — JIT в update()
       distOffset, tOffset,
       // distEnd = ровно distAt(durationSec), а не totalDist (sArr[last]): иначе
       // на стыке стык дистанций расходится на ~2 м (off-by-one сэмплера) → лёгкий рывок
@@ -107,7 +118,7 @@ export class EndlessChain implements Level {
 
   /** Готовность аудио первого сегмента (reverb-IR) — ждём до старта. */
   async readyFirst(): Promise<void> {
-    await this.segments[0]?.stem.ready();
+    await this.segments[0]?.stem?.ready();
   }
 
   /** Активные (не снятые) сегменты — Game обходит их для блоков/трафика. */
@@ -115,10 +126,10 @@ export class EndlessChain implements Level {
     return this.segments.filter((s) => !s.retired);
   }
 
-  /** Подвесить следующий и снять отъехавшие. Зовётся каждый кадр. */
-  update(globalDist: number, _globalT: number) {
+  /** Подвесить следующий, завести/снять аудио, снять отъехавшие. Каждый кадр. */
+  update(globalDist: number, globalT: number) {
     const last = this.segments[this.segments.length - 1];
-    // подвесить следующий сегмент заранее
+    // ГЕОМЕТРИЮ подвешиваем рано (мир строит чанки вперёд)
     if (last && !this.pending && last.distEnd - globalDist < APPEND_AHEAD) {
       this.pending = true;
       this.nextSong().then((song) => {
@@ -126,23 +137,31 @@ export class EndlessChain implements Level {
         this.pending = false;
       }).catch(() => { this.pending = false; });
     }
-    // снять отъехавшие (звук дозвучал и машина далеко впереди)
     for (const seg of this.segments) {
       if (seg.retired) continue;
+      // АУДИО заводим поздно (JIT): ансамбли тяжёлые, держим перекрытие коротким —
+      // иначе 2–3 мастер-цепи (компрессор/лимитер/реверб) разом → хрип/перегруз
+      if (!seg.stem && seg.tOffset - globalT < AUDIO_LEAD && globalT < seg.tEnd + 2) {
+        this.ensureStem(seg);
+      }
+      // снять аудио сразу после хвоста — освободить CPU
+      if (seg.stem && globalT > seg.stem.endSec) { seg.stem.retire(); seg.stem = null; }
+      // снять отъехавшую геометрию (машина далеко впереди)
       if (seg.distEnd < globalDist - RETIRE_BEHIND && seg !== last) {
         seg.retired = true;
         this.scene.remove(seg.blocks.mesh, seg.traffic.root);
         seg.blocks.dispose();
         seg.traffic.dispose();
-        seg.stem.retire();
+        seg.stem?.retire();
+        seg.stem = null;
         this.onSegmentDone?.(seg);
       }
     }
   }
 
-  /** Тир музыкальных слоёв по комбо — применяем ко всем звучащим трекам. */
+  /** Тир музыкальных слоёв — применяем ко всем звучащим трекам (у кого есть аудио). */
   setTier(tier: number) {
-    for (const s of this.active()) s.stem.setTier(tier);
+    for (const s of this.active()) s.stem?.setTier(tier);
   }
 
   /** DDA: плотность блоков и интенсивность трафика — на все активные сегменты. */
@@ -160,6 +179,12 @@ export class EndlessChain implements Level {
     const s = this.segAtTime(t);
     if (!s) return 0;
     return Math.max(0, Math.min(1, (t - s.tOffset) / s.level.durationSec));
+  }
+
+  /** Секунд от начала текущего трека — для «интро не молчит». */
+  localSec(t: number): number {
+    const s = this.segAtTime(t);
+    return s ? t - s.tOffset : 0;
   }
 
   /** Наибольший конец трека (стык) ≤ t — для разовой церемонии финиша. */
@@ -207,7 +232,7 @@ export class EndlessChain implements Level {
       this.scene.remove(seg.blocks.mesh, seg.traffic.root);
       seg.blocks.dispose();
       seg.traffic.dispose();
-      seg.stem.retire();
+      seg.stem?.retire();
     }
     this.segments = [];
   }

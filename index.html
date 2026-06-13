@@ -60,6 +60,78 @@
         box-shadow: 0 0 8px rgba(255, 68, 255, 0.7);
         transition: width 0.15s;
       }
+      /* комбо-кольцо (Beat Saber-стиль): прогресс до следующей вехи виден телом
+         глаза; цвет/центр растут с fever и овердрайвом */
+      .combo-ring-wrap {
+        position: absolute; bottom: 6%; left: 50%; transform: translateX(-50%);
+        width: 128px; height: 128px; z-index: 5; pointer-events: none;
+        display: flex; align-items: center; justify-content: center;
+        opacity: 0; transition: opacity 0.3s;
+      }
+      .combo-ring-wrap.on { opacity: 0.95; }
+      .combo-ring {
+        position: absolute; inset: 0; border-radius: 50%;
+        background: conic-gradient(var(--rc, #22ffee) calc(var(--rp, 0) * 1%), rgba(255,255,255,0.08) 0);
+        -webkit-mask: radial-gradient(farthest-side, transparent 60%, #000 62%);
+        mask: radial-gradient(farthest-side, transparent 60%, #000 62%);
+        filter: drop-shadow(0 0 7px var(--rc, #22ffee));
+        transition: filter 0.2s;
+      }
+      .combo-ring-label {
+        position: relative; font: 800 26px/1 system-ui, sans-serif;
+        color: #fff; text-shadow: 0 2px 6px #000;
+      }
+      /* ТУРБО — ЗАКИСЬ АЗОТА (#19): бак под кольцом, держишь → тратится */
+      .od-icon {
+        position: absolute; bottom: 4.6%; left: 50%; transform: translateX(-50%);
+        z-index: 6; pointer-events: none; white-space: nowrap;
+        font: 800 11px/1 system-ui, sans-serif; letter-spacing: 0.06em;
+        color: #c8b48a; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity 0.3s;
+      }
+      .od-icon.on { opacity: 0.85; }
+      .od-icon.hot { color: #ffd24d; text-shadow: 0 0 12px #ffae3c, 0 1px 3px #000;
+        animation: od-blink 0.6s ease-in-out infinite alternate; }
+      .od-bar {
+        position: absolute; bottom: 2.6%; left: 50%; transform: translateX(-50%);
+        width: 150px; height: 8px; z-index: 5; pointer-events: none;
+        background: rgba(255,255,255,0.12); border-radius: 5px; overflow: hidden;
+        border: 1px solid rgba(255,210,90,0.25);
+        opacity: 0; transition: opacity 0.3s, box-shadow 0.2s;
+      }
+      .od-bar.on { opacity: 1; }
+      .od-bar.ready { box-shadow: 0 0 16px rgba(255,180,70,0.9); border-color: #ffd24d; }
+      .od-bar.active { box-shadow: 0 0 22px rgba(255,140,50,1); border-color: #ff8a3c; }
+      .od-bar > div {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, #ffd24d, #ff7a3c);
+        box-shadow: 0 0 10px #ffb04d; transition: width 0.12s;
+      }
+      .od-prompt {
+        position: absolute; bottom: 13%; left: 50%; transform: translateX(-50%);
+        z-index: 6; pointer-events: none; white-space: nowrap;
+        color: #ffd24d; font: 800 18px/1 system-ui, sans-serif;
+        text-shadow: 0 0 12px #ffae3c, 0 2px 4px #000; opacity: 0;
+      }
+      .od-prompt.on { opacity: 1; animation: od-blink 0.65s ease-in-out infinite alternate; }
+      @keyframes od-blink {
+        from { transform: translateX(-50%) scale(1); opacity: 0.7; }
+        to { transform: translateX(-50%) scale(1.12); opacity: 1; }
+      }
+      /* размазывание скорости: гауссов блюр ПО КРАЯМ (центр резкий) — как
+         motion blur от разгона. Радиус --tb растёт с интенсивностью турбо. */
+      .turbo-fx {
+        position: absolute; inset: 0; z-index: 4; pointer-events: none; opacity: 0;
+        backdrop-filter: blur(var(--tb, 0px));
+        -webkit-backdrop-filter: blur(var(--tb, 0px));
+        -webkit-mask: radial-gradient(ellipse 58% 52% at 50% 56%, transparent 26%, #000 92%);
+        mask: radial-gradient(ellipse 58% 52% at 50% 56%, transparent 26%, #000 92%);
+      }
+      /* края экрана на турбо — золотой пожар, ярче и быстрее fever III */
+      .fever-edge.overdrive {
+        opacity: 1;
+        box-shadow: inset 0 0 80px rgba(255,200,60,0.6), inset 0 0 200px rgba(255,120,40,0.35);
+        filter: brightness(1.6) saturate(1.3); animation-duration: 0.22s;
+      }
       .menu {
         position: absolute; inset: 0; z-index: 10;
         display: flex; align-items: center; justify-content: center;
