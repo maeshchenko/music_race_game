@@ -79,9 +79,13 @@ export interface BlockDef {
   /** Нота, бонус-пикап, золотой джекпот или мистери-«?». */
   kind: 'note' | 'magnet' | 'gold' | 'mystery';
   /** Для пикапа (kind='magnet'): какая способность. */
-  power?: 'magnet' | 'shield' | 'double';
+  power?: 'magnet' | 'shield' | 'double' | 'triple' | 'ram';
   collected: boolean;
   missed: boolean;
+  /** Хореографированный паттерн (Фаза B): свип-змейка или стена. */
+  pattern?: 'sweep' | 'wall';
+  /** Широкий «МЕГА»-блок (Фаза B): крупный, широкая зона сбора, ×2 очки. */
+  wide?: boolean;
   /** DDA: блок убран прорежением — не собирается и не считается промахом. */
   dropped?: boolean;
   /** Решение о прорежении принято (один раз, при входе в ближнюю зону). */
@@ -102,9 +106,12 @@ export const POWER_COLOR: Record<string, THREE.Color> = {
   magnet: new THREE.Color('#ffd24d'),
   shield: new THREE.Color('#44d6ff'),
   double: new THREE.Color('#ff66cc'),
+  triple: new THREE.Color('#ff3b6b'), // ×3 френзи — горячий малиновый
+  ram: new THREE.Color('#ff7a1a'), // таран — оранжевый плуг
 };
 export const POWER_CSS: Record<string, string> = {
   magnet: '#ffd24d', shield: '#44d6ff', double: '#ff66cc',
+  triple: '#ff3b6b', ram: '#ff7a1a',
 };
 const MAGNET_EVERY = [25, 40]; // раз в столько секунд трека, случайно
 
@@ -204,32 +211,54 @@ export class Blocks {
       stream.push(c);
     }
 
-    // полосы мелодическим контуром, с достижимостью
+    // полосы: обычно мелодический контур, но периодически — ХОРЕОГРАФИЯ
+    // (вариативность Фазы B): свип (вис край-в-край) или стена (серия в одной
+    // полосе). Достижимость (±1 за шаг, не чаще laneShiftGap) сохраняется.
     let lane = 0;
     let lastShiftT = -10;
     let lastFarT = -100;
     let prevPitch: number | null = null;
+    let patUntil = -1; // конец активного паттерна
+    let patKind = 0; // 0 — свип, 1 — стена (hold)
+    let patDir = 1; // направление свипа
+    let nextPatT = 10 + Math.random() * 16; // когда можно начать следующий паттерн
     for (const c of stream) {
       const dPitch = prevPitch === null ? 0 : c.pitch - prevPitch;
       prevPitch = c.pitch;
       const canShift = c.t - lastShiftT >= cfg.laneShiftGap;
+      // старт паттерна — по кулдауну, не у самого конца трека
+      if (patUntil < 0 && c.t >= nextPatT && c.t < level.durationSec - 8) {
+        patUntil = c.t + 4 + Math.random() * 3; // длиннее (4–7с) → явно читается
+        patKind = Math.random() < 0.55 ? 0 : 1;
+        patDir = lane >= 1 ? -1 : lane <= -1 ? 1 : (Math.random() < 0.5 ? -1 : 1);
+        nextPatT = patUntil + 6 + Math.random() * 8; // чаще (пауза 6–14с)
+      }
+      if (c.t >= patUntil && patUntil > 0) patUntil = -1; // паттерн кончился
       if (canShift) {
-        let dir = 0;
-        if (dPitch > 1) dir = 1;
-        else if (dPitch < -1) dir = -1;
-        // дальний прыжок край→край: только хард, по кулдауну, не подряд
-        if (cfg.farJump && Math.abs(dPitch) > 12 && Math.abs(lane) === 1 &&
-            Math.sign(dir) === -Math.sign(lane) && c.t - lastFarT > FAR_JUMP_COOLDOWN &&
-            c.t - lastShiftT >= cfg.laneShiftGap * 1.5) {
-          lane = -lane;
-          lastFarT = c.t;
-          lastShiftT = c.t;
-        } else if (dir !== 0 && lane + dir >= -1 && lane + dir <= 1) {
-          lane += dir;
-          lastShiftT = c.t;
-        } else if (dir === 0 && lane !== 0 && c.t - lastShiftT >= cfg.laneShiftGap * 2.2) {
-          lane += lane > 0 ? -1 : 1; // без мелодического движения — дрейф к центру
-          lastShiftT = c.t;
+        if (patUntil > 0 && patKind === 0) {
+          // СВИП: ведём полосу край-в-край, разворот у краёв
+          if (lane >= 1) patDir = -1; else if (lane <= -1) patDir = 1;
+          if (lane + patDir >= -1 && lane + patDir <= 1) { lane += patDir; lastShiftT = c.t; }
+        } else if (patUntil > 0 && patKind === 1) {
+          // СТЕНА: держим полосу (серия блоков в одной линии) — ничего не двигаем
+        } else {
+          // мелодический контур
+          let dir = 0;
+          if (dPitch > 1) dir = 1;
+          else if (dPitch < -1) dir = -1;
+          if (cfg.farJump && Math.abs(dPitch) > 12 && Math.abs(lane) === 1 &&
+              Math.sign(dir) === -Math.sign(lane) && c.t - lastFarT > FAR_JUMP_COOLDOWN &&
+              c.t - lastShiftT >= cfg.laneShiftGap * 1.5) {
+            lane = -lane;
+            lastFarT = c.t;
+            lastShiftT = c.t;
+          } else if (dir !== 0 && lane + dir >= -1 && lane + dir <= 1) {
+            lane += dir;
+            lastShiftT = c.t;
+          } else if (dir === 0 && lane !== 0 && c.t - lastShiftT >= cfg.laneShiftGap * 2.2) {
+            lane += lane > 0 ? -1 : 1; // без мелодического движения — дрейф к центру
+            lastShiftT = c.t;
+          }
         }
       }
       const dist = level.distAt(c.t);
@@ -244,6 +273,9 @@ export class Blocks {
         beatType: c.beat,
         voice: c.voice,
         kind: 'note',
+        pattern: patUntil > 0 ? (patKind === 0 ? 'sweep' : 'wall') : undefined,
+        // МЕГА-блок: иногда на сильную долю вне паттерна — крупный акцент
+        wide: patUntil < 0 && c.beat === 'strong' && Math.random() < 0.1,
         collected: false,
         missed: false,
       });
@@ -264,7 +296,7 @@ export class Blocks {
 
     // бонусы-пикапы: на пути потока, раз в 25–40 секунд; способность случайна
     {
-      const POWERS: ('magnet' | 'shield' | 'double')[] = ['magnet', 'shield', 'double'];
+      const POWERS: NonNullable<BlockDef['power']>[] = ['magnet', 'shield', 'double', 'triple', 'ram'];
       let nextAt = 12 + Math.random() * 10;
       for (let i = 1; i < stream.length; i++) {
         if (stream[i].t < nextAt) continue;
@@ -419,12 +451,13 @@ export class Blocks {
     for (let i = this.cursor; i < this.defs.length; i++) {
       const b = this.defs[i];
       if (b.dist > carDist + 2.0) break;
+      const lat = b.wide ? COLLECT_LATERAL * 1.7 : COLLECT_LATERAL; // МЕГА — шире зона
       if (!b.collected && !b.missed && !b.dropped &&
-          b.dist <= carDist + 1.2 && Math.abs(b.x - carWorldX) < COLLECT_LATERAL) {
+          b.dist <= carDist + 1.2 && Math.abs(b.x - carWorldX) < lat) {
         b.collected = true;
         // grading: попадание в центр полосы блока = PERFECT (непрерывная
         // ось мастерства — всегда видно, что оптимизировать)
-        const perfect = Math.abs(b.x - carWorldX) < COLLECT_LATERAL * 0.42;
+        const perfect = Math.abs(b.x - carWorldX) < lat * 0.42;
         onCollect(b, perfect);
         this.dummy.position.set(b.x, b.y, -b.dist);
         this.dummy.scale.setScalar(0.0001);
@@ -466,7 +499,9 @@ export class Blocks {
         this.dummy.rotation.set(0, time * 1.4 + i * 0.7, time * 0.9 + i);
         const pulse = 1 + Math.sin(time * 5 + i) * pulseAmp;
         const size = (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1))
-          * BEAT_SIZE[b.beatType]; // сильная доля крупнее
+          * BEAT_SIZE[b.beatType] // сильная доля крупнее
+          * (b.pattern ? 1.4 : 1) // блоки паттерна крупнее — фигура читается явно
+          * (b.wide ? 1.9 : 1); // МЕГА-блок — крупный акцент
         this.dummy.scale.setScalar(size * pulse);
       }
       this.dummy.updateMatrix();

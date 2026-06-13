@@ -93,6 +93,7 @@ export class Game {
   private nextGolden = -1; // когда стартует следующая золотая волна
   private nextNovelty = -1; // #36/#35 когда сменить тему/погоду (новизна против скуки)
   private lastComboTier = 1; // #11/#12 отслеживаем смену музыкального слоя по комбо
+  private lastPattern: BlockDef['pattern'] = undefined; // анонс входа в паттерн
   // #23/#24 микро-цель: короткая задача (10–20с), цель мелкая → полоска почти
   // полна постоянно. Выполнил → бонус + новая. Близкий ясный таргет (СДВГ).
   private goalEl!: HTMLDivElement;
@@ -108,6 +109,8 @@ export class Game {
   private get fever() { return this.feverLevel > 0; }
   private magnetUntil = -1; // время музыки, до которого активен магнит
   private doubleUntil = -1; // время музыки, до которого активен ×2 за пикап
+  private tripleUntil = -1; // ×3 «френзи»-пикап
+  private ramUntil = -1; // «таран»: плуг сквозь преграды без штрафа (таймовый)
   private shielded = false; // щит: следующая авария без штрафа
   private hitStop = 0; // сек заморозки мира — продаёт вес удара
   private bloomPass: UnrealBloomPass | null = null;
@@ -454,6 +457,12 @@ export class Game {
       } else if (power === 'double') {
         this.doubleUntil = t + 10;
         this.pop('✖2 ОЧКИ x2!', 'pop-combo pop-super');
+      } else if (power === 'triple') {
+        this.tripleUntil = t + 8;
+        this.pop('✖3 ФРЕНЗИ!', 'pop-combo pop-mega');
+      } else if (power === 'ram') {
+        this.ramUntil = t + 5;
+        this.pop('🚂 ТАРАН!', 'pop-combo pop-mega');
       } else {
         this.magnetUntil = t + 8;
         this.pop('🧲 МАГНИТ!', 'pop-combo pop-super');
@@ -523,6 +532,11 @@ export class Game {
     this.maxCombo = Math.max(this.maxCombo, this.combo);
     this.collected++;
     this.trackHit(true);
+    // анонс входа в хореографированный паттерн — чтобы фигура читалась явно
+    if (b.pattern && b.pattern !== this.lastPattern) {
+      this.pop(b.pattern === 'sweep' ? '🌊 ВОЛНА!' : '🧱 СТЕНА!', 'pop-combo pop-super');
+    }
+    this.lastPattern = b.pattern;
     // разогрев сессии: каждые 70 блоков — тир вверх (растущий множитель/спектакль)
     const newHeat = Math.floor(this.collected / 70);
     if (newHeat > this.sessionHeat) { this.sessionHeat = newHeat; this.heatUp(); }
@@ -535,14 +549,15 @@ export class Game {
       this.perfectStreak = 0;
     }
     const grade = perfect ? 1.2 + Math.min(this.perfectStreak, 10) * 0.03 : 1;
-    const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
+    const dbl = t < this.tripleUntil ? 3 : t < this.doubleUntil ? 2 : 1; // пикап ×2/×3
     const od = this.overdrive ? 2 : 1; // овердрайв ×2 поверх всего
     const heat = 1 + Math.min(this.sessionHeat, 30) * 0.05; // разогрев: до +1.5× за долгую сессию
     const golden = t < this.goldenUntil; // #18 золотая волна
     const gw = golden ? 2.5 : 1;
+    const wide = b.wide ? 2 : 1; // МЕГА-блок ×2
     const pts = Math.round(
       (10 + (b.vel / 127) * 10) * b.count *
-      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl * od * heat * gw,
+      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl * od * heat * gw * wide,
     );
     this.score += pts;
     // банк овердрайва копится сбором (не во время самого овердрайва)
@@ -553,7 +568,8 @@ export class Game {
     // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
     // #40 directional: обломки летят НА камеру (vzBias +6) — «снёс блок собой»
     this.particles.burst(b.x, b.y, wz, golden ? C_GOLD_SPARK : VOICE_COLORS[b.voice],
-      12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2, 6);
+      (12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2) * (b.wide ? 2 : 1), 6);
+    if (b.wide) this.shake = Math.min(0.5, this.shake + 0.12); // МЕГА — ощутимый удар
     if (perfect) {
       this.particles.burst(b.x, b.y + 0.3, wz, C_PERFECT, 8);
       if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
@@ -635,14 +651,11 @@ export class Game {
     const frac = this.endless && this.chain ? this.chain.localFrac(t) : t / this.level.durationSec;
     if (frac > 0.8) target = Math.max(target, 0.8 + (frac - 0.8) / 0.2 * 0.2);
     this.intensity += (target - this.intensity) * Math.min(1, dt * 0.8); // плавно ~1.3с
-    const density = 0.55 + this.intensity * 0.45; // 0.55..1.0
-    if (this.endless && this.chain) {
-      this.chain.setDensity(density);
-      this.chain.setIntensity(this.intensity);
-    } else {
-      this.blocks.setDensity(density);
-      this.traffic.setIntensity(this.intensity);
-    }
+    // блоки-ноты НЕ прорежаем (раньше схлопывались в невидимость впереди —
+    // выглядело странно/демотивирующе; промах и так прощается, хотим МНОГО
+    // собирать). DDA рулит только плотностью ТРАФИКА (преград).
+    if (this.endless && this.chain) this.chain.setIntensity(this.intensity);
+    else this.traffic.setIntensity(this.intensity);
   }
 
   /** Церемония рекорда на финише: золотой салют вокруг машины. */
@@ -684,8 +697,6 @@ export class Game {
     }
     // климакс-ПЕРЕХОД (не «финиш» — едем дальше!): полноэкранная вспышка +
     // тройная ударная волна + хайп-слэм + подпись со след. треком
-    const HYPE = ['ГОНИМ ДАЛЬШЕ!', 'ЕЩЁ ТРЕК!', 'ОГОНЬ — ДАЛЬШЕ!', 'НЕ ТОРМОЗИ!', 'ПОЕХАЛИ!', 'ДАВАЙ ЕЩЁ!'];
-    const hype = HYPE[Math.floor(Math.random() * HYPE.length)];
     const genre = this.chain?.genreAt(t) ?? '';
     const fx = document.createElement('div');
     fx.className = 'finale-fx';
@@ -693,7 +704,7 @@ export class Game {
       + '<div class="finale-ring" style="--d:0s"></div>'
       + '<div class="finale-ring" style="--d:.13s"></div>'
       + '<div class="finale-ring" style="--d:.26s"></div>'
-      + `<div class="finale-text">${hype}</div>`
+      + '<div class="finale-text">УРОВЕНЬ ПРОЙДЕН</div>'
       + `<div class="finale-sub">ДАЛЬШЕ${genre ? ': ' + genre.toUpperCase() : ''}</div>`;
     this.fx.appendChild(fx);
     setTimeout(() => fx.remove(), 1700);
@@ -1038,7 +1049,7 @@ export class Game {
           (b, perfect) => this.onCollect(b, perfect, t, seg.distOffset),
           () => this.onMiss(),
         );
-        const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX, this.nosActive);
+        const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX, this.nosActive || t < this.ramUntil);
         if (r.collided) hitObs = r.collided;
         if (r.grazed) grazed = r.grazed;
         if (r.knocked) knocked = r.knocked;
@@ -1049,7 +1060,7 @@ export class Game {
         (b, perfect) => this.onCollect(b, perfect, t, 0),
         () => this.onMiss(),
       );
-      const r = this.traffic.update(t, this.level, dist, carWorldX, this.nosActive);
+      const r = this.traffic.update(t, this.level, dist, carWorldX, this.nosActive || t < this.ramUntil);
       hitObs = r.collided;
       grazed = r.grazed;
       knocked = r.knocked;
@@ -1190,7 +1201,9 @@ export class Game {
         `${this.sessionHeat > 0 ? ` · 🔥разогрев ×${(1 + Math.min(this.sessionHeat, 30) * 0.05).toFixed(2)}` : ''}` +
         `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
         `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
-        `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
+        `${t < this.tripleUntil ? ` · ✖3 ${Math.ceil(this.tripleUntil - t)}с`
+          : t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
+        `${t < this.ramUntil ? ` · 🚂${Math.ceil(this.ramUntil - t)}с` : ''}` +
         `${this.shielded ? ' · 🛡' : ''}` +
         recPart +
         // endless: без таймера трека — сессия «не считает время» (запрос игрока)
