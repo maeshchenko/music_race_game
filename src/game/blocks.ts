@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import type { Song } from 'midi-gen/core';
 import type { Level } from './level';
+import { buildBeatGrid, extractRhythm, classifyTick } from './rhythm';
+
+/** Сила доли блока: размер + пульс-кик. */
+export type BeatType = 'strong' | 'weak' | 'off' | 'solo';
+/** Голос блока: что озвучивает сбор (дубль реального события трека) + цвет. */
+export type Voice = 'lead' | 'bass' | 'kick' | 'snare';
 
 /**
  * Неоновые блоки: единый собираемый поток. Одновременные ноты склеиваются
@@ -16,16 +22,17 @@ const CLUSTER_SEC = 0.09; // ноты ближе — один блок-акко�
 /** Сложность: плотность потока и подвижность дорожки. */
 export type Difficulty = 'light' | 'norm' | 'hard';
 const DIFF_CFG: Record<Difficulty, {
-  rolesPerBar: number;
+  beats: BeatType[]; // какие доли ритма берём (по силе)
   laneShiftGap: number; // мин. время между сменами полосы, с
   maxPerSec: number; // кап плотности блоков
   farJump: boolean; // разрешён ли прыжок край→край
 }> = {
-  // генерим с запасом — интенсивность прореживает вниз при провале (см. setDensity),
-  // на полной интенсивности (жжёшь / хард) поток гуще = веселее
-  light: { rolesPerBar: 1, laneShiftGap: 0.7, maxPerSec: 2.2, farJump: false },
-  norm: { rolesPerBar: 1, laneShiftGap: 0.5, maxPerSec: 3.4, farJump: false },
-  hard: { rolesPerBar: 2, laneShiftGap: 0.38, maxPerSec: 5.5, farJump: true },
+  // ритм-слой по силе доли (проще — сильные, сложнее — +бэкбит, +офф). Мелодия
+  // (lead) идёт ВСЕГДА поверх — она и есть «песня, которую ты играешь».
+  // плотность держим выше: СДВГ-режим любит частое подкрепление, промах нейтрален.
+  light: { beats: ['strong'], laneShiftGap: 0.6, maxPerSec: 3.2, farJump: false },
+  norm: { beats: ['strong', 'weak'], laneShiftGap: 0.42, maxPerSec: 4.6, farJump: false },
+  hard: { beats: ['strong', 'weak', 'off'], laneShiftGap: 0.34, maxPerSec: 6.5, farJump: true },
 };
 
 const FAR_JUMP_COOLDOWN = 15; // с
@@ -37,16 +44,38 @@ export const LANE_COLORS = [
 ];
 export const LANE_CSS = ['#22ffee', '#ff44ff', '#66ff66'];
 
+/** Цвет блока по ГОЛОСУ — видно, какой инструмент озвучишь сбором. */
+export const VOICE_COLORS: Record<Voice, THREE.Color> = {
+  lead: new THREE.Color('#c14dff'), // фиолет — мелодия (её ты «играешь»)
+  bass: new THREE.Color('#3a7bff'), // синий — бас
+  kick: new THREE.Color('#ff5a3c'), // красно-оранж — бочка (сильный удар)
+  snare: new THREE.Color('#22ffee'), // циан — снейр (бэкбит)
+};
+export const VOICE_CSS: Record<Voice, string> = {
+  lead: '#c14dff', bass: '#3a7bff', kick: '#ff5a3c', snare: '#22ffee',
+};
+/** Множитель размера блока по силе доли — сильная заметно крупнее. */
+const BEAT_SIZE: Record<BeatType, number> = {
+  strong: 1.55, weak: 0.95, off: 0.7, solo: 1.05,
+};
+/** Приоритеты для склейки/прорежения: тон важнее перкуссии, сильное важнее слабого. */
+const VOICE_RANK: Record<Voice, number> = { lead: 3, bass: 2, snare: 1, kick: 0 };
+const BEAT_RANK: Record<BeatType, number> = { strong: 3, weak: 2, off: 1, solo: 0 };
+
 export interface BlockDef {
   dist: number;
   lane: number; // -1 | 0 | 1 — для цвета
   x: number; // мировой x (ось дороги + полоса); магнит двигает
   y: number;
   vel: number;
-  /** MIDI-питч исходной ноты песни — на нём озвучивается сбор (часть музыки). */
+  /** MIDI-питч реального события песни — сбор дублирует его (ты «играешь» трек). */
   pitch: number;
   /** Сколько нот склеено: множитель очков (кап 3) и размера. */
   count: number;
+  /** Сила доли (размер + пульс-кик). */
+  beatType: BeatType;
+  /** Голос: тембр сбора + цвет блока. */
+  voice: Voice;
   /** Нота, бонус-пикап, золотой джекпот или мистери-«?». */
   kind: 'note' | 'magnet' | 'gold' | 'mystery';
   /** Для пикапа (kind='magnet'): какая способность. */
@@ -96,58 +125,82 @@ export class Blocks {
     extras: BlockExtras = { gold: false, mystery: 0 },
   ) {
     const cfg = DIFF_CFG[diff];
-    const secPerTick = 60 / (song.ppq * song.bpm);
 
-    // покрытие всех тактов: в каждом такте — ноты самых «мелодичных»
-    // из звучащих дорожек (на хард — двух)
-    const ROLE_ORDER = ['lead', 'arp', 'counter', 'chords', 'bass', 'drums'] as const;
-    const barTicks = (song.ppq * 4 * song.timeSig[0]) / song.timeSig[1];
-    const barsCount = Math.max(1, Math.ceil(song.durationTicks / barTicks));
-    const byRoleBar = new Map<string, (typeof song.tracks[0]['notes'])[]>();
-    for (const tr of song.tracks) {
-      if (byRoleBar.has(tr.role)) continue; // первая дорожка роли
-      const buckets: (typeof tr.notes)[] = Array.from({ length: barsCount }, () => []);
-      for (const n of tr.notes) {
-        const b = Math.min(barsCount - 1, Math.floor(n.start / barTicks));
-        buckets[b].push(n);
-      }
-      byRoleBar.set(tr.role, buckets);
-    }
-    const chosen: typeof song.tracks[0]['notes'] = [];
-    for (let b = 0; b < barsCount; b++) {
-      let taken = 0;
-      for (const role of ROLE_ORDER) {
-        const ns = byRoleBar.get(role)?.[b];
-        if (ns?.length) {
-          chosen.push(...ns);
-          if (++taken >= cfg.rolesPerBar) break;
-        }
-      }
-    }
-    chosen.sort((a, b) => a.start - b.start);
+    // ритм-секция (kick/snare/бас), привязанная к сетке долей и расклассифицированная
+    // по силе доли. Блоки садятся СЮДА — игра в ритм. Мелодия-соло берётся только
+    // в безритмовых тактах (барабанов нет, держится одна нота).
+    const grid = buildBeatGrid(song);
+    const { slots } = extractRhythm(song, grid);
+    const allowed = new Set(cfg.beats);
 
-    // кластеризация: одновременные/почти одновременные ноты → один блок
-    interface Cluster { t: number; pitch: number; vel: number; count: number; }
+    // мелодия = ВЕДУЩИЙ голос игры (её ты «играешь»). Берём ноты одной ведущей
+    // роли по приоритету lead>counter>arp (lead — настоящий мотив; arp — текстура,
+    // в крайнем случае). Берём ЩЕДРО на ВСЕХ позициях (вкл. синкопы) — мелодия
+    // и есть «busy»-слой. Бас/барабаны = только ПУЛЬС на сильную/слабую долю.
+    const MELODY_ROLES = ['lead', 'counter', 'arp'] as const;
+    const leadRole = MELODY_ROLES.find((r) => song.tracks.some((t) => t.role === r));
+    const leadNotes = leadRole
+      ? song.tracks.find((t) => t.role === leadRole)?.notes ?? [] : [];
+
+    // единый поток событий. Каждое — реальное событие трека; сбор продублирует
+    // именно его → «я играю музыку» (модель Beat Saber/Audiosurf).
+    interface Pick { t: number; pitch: number; vel: number; beat: BeatType; voice: Voice; }
+    const beatOf = (cls: ReturnType<typeof classifyTick>): BeatType =>
+      cls === 'strong' ? 'strong' : cls === 'weak' ? 'weak' : 'off';
+    const picks: Pick[] = [];
+    // 1) ПУЛЬС: бас/бочка/снейр ТОЛЬКО на сильную/слабую долю. Офф-биты и хэт-
+    //    поток отбрасываем — иначе бас 16-х затапливает мелодию (был баг lead33/bass182).
+    for (const s of slots) {
+      if (s.cls !== 'strong' && s.cls !== 'weak') continue; // без офф-флуда баса
+      const realHit = s.sources.has('kick') || s.sources.has('bass')
+        || s.sources.has('snare') || s.sources.has('perc');
+      if (!realHit) continue;
+      const beat = beatOf(s.cls);
+      if (!allowed.has(beat)) continue;
+      const voice: Voice = s.sources.has('bass') ? 'bass'
+        : s.sources.has('snare') ? 'snare' : 'kick';
+      picks.push({ t: s.tick * grid.secPerTick, pitch: s.pitch, vel: s.vel, beat, voice });
+    }
+    // 2) МЕЛОДИЯ: тональные блоки на их позиции — всегда (это «песня, что играешь»)
+    for (const n of leadNotes) {
+      picks.push({
+        t: n.start * grid.secPerTick, pitch: n.pitch, vel: n.vel,
+        beat: beatOf(classifyTick(n.start, grid)), voice: 'lead',
+      });
+    }
+    picks.sort((a, b) => a.t - b.t);
+
+    // склейка одновременных → блок-аккорд. Голос/питч — самого «тонального»
+    // события (lead>bass>snare>kick), сила доли — самого сильного. Кик-пульс на
+    // сильной доле добавит sfx по beatType.
+    interface Cluster { t: number; pitch: number; vel: number; count: number; beat: BeatType; voice: Voice; }
     const clusters: Cluster[] = [];
-    for (const n of chosen) {
-      const t = n.start * secPerTick;
+    for (const p of picks) {
+      const t = p.t;
       if (t < 5 || t >= level.durationSec - 1.2) continue; // разгон и короткий хвост у финиша
       const last = clusters[clusters.length - 1];
       if (last && t - last.t <= CLUSTER_SEC) {
-        last.vel = Math.max(last.vel, n.vel);
-        last.pitch = (last.pitch * last.count + n.pitch) / (last.count + 1);
+        last.vel = Math.max(last.vel, p.vel);
         last.count++;
+        if (BEAT_RANK[p.beat] > BEAT_RANK[last.beat]) last.beat = p.beat;
+        if (VOICE_RANK[p.voice] > VOICE_RANK[last.voice]) { last.voice = p.voice; last.pitch = p.pitch; }
       } else {
-        clusters.push({ t, pitch: n.pitch, vel: n.vel, count: 1 });
+        clusters.push({ t, pitch: p.pitch, vel: p.vel, count: 1, beat: p.beat, voice: p.voice });
       }
     }
 
-    // кап плотности: не чаще maxPerSec
+    // кап плотности: не чаще maxPerSec. В конфликте держим важнейшее — мелодию
+    // (большой бонус lead), затем силу доли. Поток = «играбельная песня» в бит.
+    const weight = (c: Cluster) =>
+      (c.voice === 'lead' ? 100 : 0) + BEAT_RANK[c.beat] * 4 + VOICE_RANK[c.voice];
     const minGap = 1 / cfg.maxPerSec;
     const stream: Cluster[] = [];
     for (const c of clusters) {
       const last = stream[stream.length - 1];
-      if (last && c.t - last.t < minGap) continue;
+      if (last && c.t - last.t < minGap) {
+        if (weight(c) > weight(last)) stream[stream.length - 1] = c;
+        continue;
+      }
       stream.push(c);
     }
 
@@ -188,10 +241,25 @@ export class Blocks {
         vel: c.vel,
         pitch: Math.round(c.pitch),
         count: Math.min(c.count, 3),
+        beatType: c.beat,
+        voice: c.voice,
         kind: 'note',
         collected: false,
         missed: false,
       });
+    }
+
+    // dev-сводка: разбивка по голосу/доле — видно баланс мелодии и ритма
+    if (import.meta.env?.DEV) {
+      const v: Record<string, number> = { lead: 0, bass: 0, kick: 0, snare: 0 };
+      const b: Record<string, number> = { strong: 0, weak: 0, off: 0, solo: 0 };
+      for (const d of this.defs) { v[d.voice]++; b[d.beatType]++; }
+      // eslint-disable-next-line no-console
+      console.log(
+        `[blocks] ${diff} «${song.title}» ${song.bpm}bpm: ${this.defs.length} блоков · ` +
+        `голос[lead ${v.lead} bass ${v.bass} kick ${v.kick} snare ${v.snare}] · ` +
+        `доля[strong ${b.strong} weak ${b.weak} off ${b.off}]`,
+      );
     }
 
     // бонусы-пикапы: на пути потока, раз в 25–40 секунд; способность случайна
@@ -212,6 +280,8 @@ export class Blocks {
           vel: 100,
           pitch: 60,
           count: 1,
+          beatType: 'solo',
+          voice: 'lead',
           kind: 'magnet',
           power: POWERS[Math.floor(Math.random() * POWERS.length)],
           collected: false,
@@ -234,6 +304,8 @@ export class Blocks {
           vel: 127,
           pitch: 60,
           count: 1,
+          beatType: 'solo',
+          voice: 'lead',
           kind,
           collected: false,
           missed: false,
@@ -264,7 +336,7 @@ export class Blocks {
         b.kind === 'magnet' ? (POWER_COLOR[b.power ?? 'magnet'] ?? MAGNET_COLOR)
         : b.kind === 'gold' ? GOLD_COLOR
         : b.kind === 'mystery' ? MYSTERY_COLOR
-        : LANE_COLORS[b.lane + 1]);
+        : VOICE_COLORS[b.voice]); // нота: цвет = голос (инструмент сбора)
     });
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
@@ -393,7 +465,8 @@ export class Blocks {
       } else {
         this.dummy.rotation.set(0, time * 1.4 + i * 0.7, time * 0.9 + i);
         const pulse = 1 + Math.sin(time * 5 + i) * pulseAmp;
-        const size = (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1));
+        const size = (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1))
+          * BEAT_SIZE[b.beatType]; // сильная доля крупнее
         this.dummy.scale.setScalar(size * pulse);
       }
       this.dummy.updateMatrix();

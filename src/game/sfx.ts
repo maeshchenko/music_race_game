@@ -1,22 +1,40 @@
 import * as Tone from 'tone';
 
 /**
- * Звуки подбора: короткий «дзынь», питч ползёт вверх по пентатонике
- * с ростом комбо. Фиксированный пул моносинтов + троттлинг — PolySynth
- * на шторме подборов перегружал аудиопоток (звук пропадал, часы скакали).
+ * Звуки подбора (модель Beat Saber/Audiosurf): сбор ДУБЛИРУЕТ реальное событие
+ * трека — нота lead, бас, бочка или снейр — поверх играющей музыки. Совпадение
+ * удара с музыкой = дофамин, даже если мелодия не узнаётся. Сверху — восходящая
+ * в-ключе «искра» по комбо (рост-награда). Промах нейтрален: ноль наказания.
+ * Фиксированный пул моносинтов + троттлинг — PolySynth на шторме подборов
+ * перегружал аудиопоток.
  */
+type Voice = 'lead' | 'bass' | 'kick' | 'snare';
+
 export class Sfx {
   private pool: Tone.Synth[] = [];
   private next = 0;
   private lastAt = 0;
   private lastSchedule = 0; // монотонное время планирования — Tone не терпит дублей
   private thud: Tone.Synth;
+  private kick: Tone.MembraneSynth; // бух на сильную долю — пульс трека
+  private bass: Tone.Synth; // дубль басовой ноты
+  private snare: Tone.NoiseSynth; // щелчок бэкбита
+  private lastKickAt = 0;
+  private lastSnareAt = 0;
 
-  /** Время не раньше предыдущего запланированного + зазор — иначе Tone кидает. */
-  private slot(base: number): number {
-    const t = Math.max(base, this.lastSchedule + 0.01);
-    this.lastSchedule = t;
-    return t;
+  /**
+   * Низколатентное время сбора. Контекст игры — latencyHint:'playback' (большой
+   * lookAhead ~150мс): отлично для заранее расписанной музыки, но Tone.now() =
+   * currentTime + lookAhead → SFX звучал бы с задержкой ~150мс (тот самый «делэй»).
+   * Берём СЫРОЕ время аудио-контекста + крошечный упреждающий зазор → звук
+   * срабатывает почти мгновенно, в момент сбора. Монотонный guard — лишь чтобы
+   * два события не сели на один тик (Tone кидает на дублях), без убегания вперёд.
+   */
+  private soon(): number {
+    const t = Tone.getContext().rawContext.currentTime + 0.012;
+    const safe = Math.max(t, this.lastSchedule + 0.004);
+    this.lastSchedule = safe;
+    return safe;
   }
 
   /**
@@ -27,6 +45,9 @@ export class Sfx {
   setOffset(db: number) {
     for (const s of this.pool) s.volume.value = -14 + db;
     this.thud.volume.value = -20 + db;
+    this.kick.volume.value = -8 + db;
+    this.bass.volume.value = -15 + db;
+    this.snare.volume.value = -18 + db;
   }
 
   constructor() {
@@ -41,64 +62,116 @@ export class Sfx {
       envelope: { attack: 0.002, decay: 0.09, sustain: 0, release: 0.05 },
       volume: -20,
     }).toDestination();
+    // короткий плотный бух: пульс на сильную долю, слышен поверх музыки
+    this.kick = new Tone.MembraneSynth({
+      pitchDecay: 0.03, octaves: 5,
+      envelope: { attack: 0.001, decay: 0.16, sustain: 0, release: 0.02 },
+      volume: -8,
+    }).toDestination();
+    // бас-дубль: короткая плотная пила
+    this.bass = new Tone.Synth({
+      oscillator: { type: 'sawtooth' },
+      envelope: { attack: 0.004, decay: 0.13, sustain: 0, release: 0.05 },
+      volume: -15,
+    }).toDestination();
+    // снейр-щелчок: короткий белый шум
+    this.snare = new Tone.NoiseSynth({
+      noise: { type: 'white' },
+      envelope: { attack: 0.001, decay: 0.07, sustain: 0, release: 0.02 },
+      volume: -18,
+    }).toDestination();
   }
 
-  collect(combo: number, fever = false, count = 1) {
+  /** Один тональный «дзынь» из пула (round-robin), velocity 0..1. */
+  private tone(midi: number, vel: number) {
+    const s = this.pool[this.next++ % this.pool.length];
+    s.triggerAttackRelease(Tone.Frequency(Math.min(midi, 103), 'midi').toFrequency(), 0.09, this.soon(), vel);
+  }
+
+  collect(
+    combo: number, fever = false, count = 1,
+    beat: 'strong' | 'weak' | 'off' | 'solo' = 'weak',
+    voice: Voice = 'lead', pitch = 72, perfect = false,
+  ) {
+    // ПУЛЬС: сильная доля или бочка — всегда бух, мимо троттла. Низколатентно
+    // (soon) → удар совпадает с тем, что видишь, без делэя муз-движка.
+    if (beat === 'strong' || voice === 'kick') {
+      const tk = performance.now();
+      if (tk - this.lastKickAt > 55) {
+        this.lastKickAt = tk;
+        this.kick.triggerAttackRelease('C1', 0.16, this.soon(), perfect ? 1 : 0.85);
+      }
+    }
+    // СНЕЙР: щелчок на бэкбит-голосе
+    if (voice === 'snare') {
+      const ts = performance.now();
+      if (ts - this.lastSnareAt > 45) {
+        this.lastSnareAt = ts;
+        this.snare.triggerAttackRelease(0.05, this.soon());
+      }
+    }
+    // тональный слой троттлим, но чаще прежнего — частое подкрепление
     const now = performance.now();
-    if (now - this.lastAt < 55) return; // не чаще ~18/с
+    if (now - this.lastAt < 38) return; // ~26/с
     this.lastAt = now;
-    // лестница первые 10 блоков (C5→A6), дальше — мелодическая петля
-    // по верхней пентатонике: комбо живёт, но без писка и монотонности
+    const bright = Math.min(1, 0.55 + Math.min(combo, 40) * 0.011) * (fever ? 1 : 0.92);
+    const clamp = (lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(pitch)));
+    // ДУБЛЬ реального события: слышишь, что «сыграл» именно эту ноту трека
+    if (voice === 'lead') {
+      const m = clamp(60, 96);
+      this.tone(m, bright);
+      if (count >= 2) this.tone(m + 7, bright * 0.7); // аккорд
+      if (count >= 3) this.tone(m + 12, bright * 0.6);
+    } else if (voice === 'bass') {
+      const m = clamp(28, 52);
+      this.bass.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.13, this.soon(), bright);
+    }
+    // ДОПАМИН-ИСКРА: восходящая в-ключе нотка по комбо (+октава на перфект) —
+    // звенит сверху на КАЖДЫЙ сбор. Тон даёт «я играю», искра — рост-награду.
     const PENTA = [0, 2, 4, 7, 9];
-    const LOOP = [9, 8, 7, 8, 9, 7, 6, 8];
-    const step = combo <= 10 ? combo - 1 : LOOP[(combo - 11) % LOOP.length];
-    const midi = 72 + PENTA[step % 5] + 12 * Math.floor(step / 5) + (fever ? 7 : 0);
-    const play = (m: number) => {
-      const synth = this.pool[this.next++ % this.pool.length];
-      synth.triggerAttackRelease(Tone.Frequency(Math.min(m, 100), 'midi').toFrequency(), 0.09);
-    };
-    play(midi);
-    // блок-аккорд звенит аккордом: квинта, на тройном — ещё октава
-    if (count >= 2) play(midi + 7);
-    if (count >= 3) play(midi + 12);
+    const spark = 79 + PENTA[combo % 5] + (perfect ? 12 : 0) + (fever ? 5 : 0);
+    this.tone(Math.min(spark, 103), perfect ? 0.5 : 0.3);
   }
 
-  miss() {
-    this.thud.triggerAttackRelease(110, 0.07);
-  }
+  // СДВГ-режим: промах нейтрален — никакого негативного звука
+  miss() { /* тишина */ }
 
   /** Джекпот: победное арпеджио вверх, мимо троттлинга — событие редкое. */
   jackpot() {
-    const now = Tone.now();
+    const now = this.soon();
     [84, 88, 91, 96].forEach((m, k) => {
       const synth = this.pool[this.next++ % this.pool.length];
-      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.12, this.slot(now + k * 0.07));
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.12, now + k * 0.07);
     });
   }
 
   /** Щелчок барабана слот-машины. */
   tick() {
     const synth = this.pool[this.next++ % this.pool.length];
-    synth.triggerAttackRelease(1750, 0.018, this.slot(Tone.now()));
+    synth.triggerAttackRelease(1750, 0.018, this.soon());
   }
 
   /** Мистери-блок: две быстрые «блёстки». */
   mystery() {
-    const now = Tone.now();
+    const now = this.soon();
     [89, 94].forEach((m, k) => {
       const synth = this.pool[this.next++ % this.pool.length];
-      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, this.slot(now + k * 0.05));
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, now + k * 0.05);
     });
   }
 
   /** Удар о преграду: низкий глухой бум. */
   crash() {
-    this.thud.triggerAttackRelease(48, 0.3);
-    this.thud.triggerAttackRelease(65, 0.18, Tone.now() + 0.05);
+    const now = this.soon();
+    this.thud.triggerAttackRelease(48, 0.3, now);
+    this.thud.triggerAttackRelease(65, 0.18, now + 0.05);
   }
 
   dispose() {
     for (const s of this.pool) s.dispose();
     this.thud.dispose();
+    this.kick.dispose();
+    this.bass.dispose();
+    this.snare.dispose();
   }
 }

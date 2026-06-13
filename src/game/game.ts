@@ -9,7 +9,7 @@ import { World, THEMES, type WorldTheme } from './world';
 import { comboPhrase } from './phrases';
 import { buildCar } from './car';
 import {
-  Blocks, LANE_COLORS, LANE_CSS, POWER_COLOR, POWER_CSS,
+  Blocks, VOICE_COLORS, VOICE_CSS, POWER_COLOR, POWER_CSS,
   type Difficulty, type BlockExtras,
 } from './blocks';
 import { makeGate } from './gate';
@@ -669,17 +669,17 @@ export class Game {
           (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl,
         );
         this.score += pts;
-        this.sfx.collect(this.combo, this.fever, b.count);
+        this.sfx.collect(this.combo, this.fever, b.count, b.beatType, b.voice, b.pitch, perfect);
         this.scoreBump();
         const milestone = this.popFx();
         // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
-        this.particles.burst(b.x, b.y, -b.dist, LANE_COLORS[b.lane + 1], 12 + b.count * 6);
+        this.particles.burst(b.x, b.y, -b.dist, VOICE_COLORS[b.voice], 12 + b.count * 6);
         if (perfect) {
           this.particles.burst(b.x, b.y + 0.3, -b.dist, C_PERFECT, 8);
           if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
         }
         if (milestone) {
-          this.flash(LANE_CSS[b.lane + 1]);
+          this.flash(VOICE_CSS[b.voice]);
           this.shake = Math.min(0.45, this.shake + 0.3);
         } else if (b.count > 1) {
           this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
