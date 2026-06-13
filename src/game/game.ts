@@ -263,7 +263,7 @@ export class Game {
     container.appendChild(this.odBar);
     this.odIcon = document.createElement('div');
     this.odIcon.className = 'od-icon';
-    this.odIcon.textContent = IS_MOBILE ? '⚡ ЗАКИСЬ АЗОТА' : '⚡ ЗАКИСЬ АЗОТА (ЛКМ)';
+    this.odIcon.textContent = '⚡ ЗАКИСЬ АЗОТА';
     container.appendChild(this.odIcon);
     this.odPrompt = document.createElement('div');
     this.odPrompt.className = 'od-prompt';
@@ -706,20 +706,17 @@ export class Game {
     // турбо «закись азота»: держишь кнопку → тратится бак и врубается визуал
     // скорости. Мобайл — авто при полном баке (нет второй руки на удержание).
     if (IS_MOBILE && this.energy >= 1) this.nosHeld = true;
-    const wantNos = this.nosHeld && this.energy > 0.02 && !this.paused;
-    if (wantNos !== this.nosActive) {
-      this.nosActive = wantNos;
-      if (wantNos) {
-        this.conductor?.setRate(1.1); // РЕАЛЬНЫЙ разгон: темп+блоки+машина ×1.1
-        this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
-        this.flash('#ffd24d');
-        this.shake = Math.min(0.6, this.shake + 0.4);
-      } else {
-        this.conductor?.setRate(1); // вернуть базовый темп
-      }
+    // запускать можно ТОЛЬКО с полного бака; запущенный выпускается ДО ПОСЛЕДНЕГО
+    // (отпускание кнопки не останавливает разряд)
+    if (this.nosHeld && this.energy >= 1 && !this.nosActive && !this.paused) {
+      this.nosActive = true;
+      this.conductor?.setRate(1.25); // РЕАЛЬНЫЙ разгон: темп+блоки+машина ×1.25
+      this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
+      this.flash('#ffd24d');
+      this.shake = Math.min(0.6, this.shake + 0.4);
     }
     if (this.nosActive) {
-      this.energy = Math.max(0, this.energy - dt / 6); // полный бак ≈ 6 с удержания
+      this.energy = Math.max(0, this.energy - dt / 6); // полный бак ≈ 6 с
       if (this.energy <= 0) {
         this.nosActive = false;
         this.conductor?.setRate(1);
@@ -857,6 +854,7 @@ export class Game {
     type ObsHit = ReturnType<Traffic['update']>['collided'];
     let hitObs: ObsHit = null;
     let grazed: ObsHit = null;
+    let knocked: ObsHit = null;
     if (this.endless && this.chain) {
       // бесконечный сет: подвесить/снять сегменты и обойти активные. Каждый
       // сегмент сдвинут по дистанции/времени — кормим его локальными координатами
@@ -877,9 +875,10 @@ export class Game {
           (b, perfect) => this.onCollect(b, perfect, t, seg.distOffset),
           () => this.onMiss(),
         );
-        const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX);
+        const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX, this.nosActive);
         if (r.collided) hitObs = r.collided;
         if (r.grazed) grazed = r.grazed;
+        if (r.knocked) knocked = r.knocked;
       }
     } else {
       this.blocks.update(
@@ -887,9 +886,10 @@ export class Game {
         (b, perfect) => this.onCollect(b, perfect, t, 0),
         () => this.onMiss(),
       );
-      const r = this.traffic.update(t, this.level, dist, carWorldX);
+      const r = this.traffic.update(t, this.level, dist, carWorldX, this.nosActive);
       hitObs = r.collided;
       grazed = r.grazed;
+      knocked = r.knocked;
     }
 
     // адаптивная интенсивность: плотность блоков и трафика по игре + финал
@@ -913,7 +913,7 @@ export class Game {
       } else {
         this.missStreak = 0;
         this.breakCombo();
-        this.energy = 0; // авария жжёт и закись, не только кольцо
+        if (this.energy < 1) this.energy = 0; // авария жжёт незаполненный азот; полный бак цел (честно)
         this.score = Math.max(0, this.score - 50);
         this.sfx.crash();
         this.pop('💥', 'pop-combo pop-crash');
@@ -924,6 +924,12 @@ export class Game {
         // авария — явный сигнал «тяжело»: роняем интенсивность
         this.trackHit(false); this.trackHit(false); this.trackHit(false);
       }
+    }
+    // турбо снёс преграду — машина-поезд: без штрафа, искры + лёгкая тряска
+    if (knocked) {
+      this.pop('💥 СНЁС!', 'pop-combo pop-super');
+      this.particles.burst(this.car.position.x, this.car.position.y + 0.6, this.car.position.z - 1, C_GOLD_SPARK, 24);
+      this.shake = Math.min(0.5, this.shake + 0.18);
     }
     // самый длинный отрезок без аварии — для миссии «N с без аварий»
     if (!this.finished) this.noCrashSec = Math.max(this.noCrashSec, t - this.lastCrashT);
@@ -938,7 +944,7 @@ export class Game {
     }
 
     // реальная скорость выше на множитель турбо (время трека идёт быстрее)
-    const kmh = Math.round(this.level.speedAt(t) * 3.6 * (1 + 0.1 * this.nosVis));
+    const kmh = Math.round(this.level.speedAt(t) * 3.6 * (1 + 0.25 * this.nosVis));
     // HUD и комбо-полоса — ~15 Гц: на глаз неотличимо, но вчетверо меньше
     // сборки строк и DOM-записей (счёт «вздрагивает» отдельно в scoreBump)
     this.hudAcc += dt;
@@ -976,6 +982,8 @@ export class Game {
       this.odBar.classList.toggle('active', od);
       this.odIcon.classList.toggle('on', od || this.energy > 0.02);
       this.odIcon.classList.toggle('hot', ready || od);
+      // «(ЛКМ)» — только когда бак полон (тратить можно лишь с полного)
+      this.odIcon.textContent = (ready && !IS_MOBILE) ? '⚡ ЗАКИСЬ АЗОТА (ЛКМ)' : '⚡ ЗАКИСЬ АЗОТА';
       // подсказку готовности не показываем (бесит) — только «ТУРБО!» при активе
       this.odPrompt.classList.toggle('on', od);
       if (od) this.odPrompt.textContent = '⚡ ТУРБО!';

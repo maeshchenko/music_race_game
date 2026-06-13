@@ -36,6 +36,11 @@ interface Obstacle {
   threshold: number;
   /** Near-miss уже засчитан — пролёт впритирку даёт бонус один раз. */
   grazed?: boolean;
+  /** Снесена турбо-машиной: летит по баллистике, столкновений больше нет. */
+  launched?: boolean;
+  lt0?: number; // локальное время запуска
+  lp0?: THREE.Vector3; // мировая позиция в момент сноса
+  lv0?: THREE.Vector3; // стартовая скорость разлёта
 }
 
 export class Traffic {
@@ -101,11 +106,22 @@ export class Traffic {
    * Двигает преграды, ловит столкновения и near-miss (пролёт впритирку).
    * Возвращает {collided, grazed} — въезд в этом кадре и/или near-miss.
    */
-  update(t: number, level: Level, carDist: number, carWorldX: number):
-    { collided: Obstacle | null; grazed: Obstacle | null } {
+  update(t: number, level: Level, carDist: number, carWorldX: number, turbo = false):
+    { collided: Obstacle | null; grazed: Obstacle | null; knocked: Obstacle | null } {
     let collided: Obstacle | null = null;
     let grazed: Obstacle | null = null;
+    let knocked: Obstacle | null = null;
     for (const o of this.obstacles) {
+      // снесённые турбо: свободный баллистический разлёт, без столкновений
+      if (o.launched) {
+        const tau = t - o.lt0!;
+        const p = o.lp0!, v = o.lv0!;
+        o.group.position.set(p.x + v.x * tau, p.y + v.y * tau - 0.5 * 22 * tau * tau, p.z + v.z * tau);
+        o.group.rotation.x += 0.4;
+        o.group.rotation.z += 0.25;
+        o.group.visible = tau < 2.5 && o.group.position.y > -8;
+        continue;
+      }
       // прореженные интенсивностью — невидимы и без столкновения
       if (o.threshold > this.intensity) { o.group.visible = false; continue; }
       const pos = o.meetDist + o.v * (t - o.tMeet);
@@ -123,14 +139,23 @@ export class Traffic {
       const dx = Math.abs(x - carWorldX);
       if (!o.hit && dz < 2.2 && dx < 1.4) {
         o.hit = true;
-        collided = o;
+        if (turbo) {
+          // машина-поезд: сносим преграду в полёт (вверх-вбок-назад), без штрафа
+          o.launched = true;
+          o.lt0 = t;
+          o.lp0 = new THREE.Vector3(x, y, -pos);
+          o.lv0 = new THREE.Vector3((x - carWorldX) * 4 + (Math.random() - 0.5) * 6, 9 + Math.random() * 4, 15);
+          knocked = o;
+        } else {
+          collided = o;
+        }
       } else if (!o.hit && !o.grazed && dz < 2.0 && dx >= 1.4 && dx < 2.5) {
         // пролетел рядом, но не задел — риск вознаграждается
         o.grazed = true;
         grazed = o;
       }
     }
-    return { collided, grazed };
+    return { collided, grazed, knocked };
   }
 
   dispose() {
