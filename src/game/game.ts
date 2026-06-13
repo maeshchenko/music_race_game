@@ -91,6 +91,7 @@ export class Game {
   private perfectStreak = 0; // #27 PERFECT подряд → восходящее арпеджио + бонус
   private goldenUntil = -1; // #18 золотая волна активна до этого времени
   private nextGolden = -1; // когда стартует следующая золотая волна
+  private nextNovelty = -1; // #36/#35 когда сменить тему/погоду (новизна против скуки)
   // #23/#24 микро-цель: короткая задача (10–20с), цель мелкая → полоска почти
   // полна постоянно. Выполнил → бонус + новая. Близкий ясный таргет (СДВГ).
   private goalEl!: HTMLDivElement;
@@ -813,6 +814,20 @@ export class Game {
       this.nextGolden = t + 22 + Math.random() * 30;
       this.pop('🌟 ЗОЛОТАЯ ВОЛНА! ×2.5', 'pop-combo pop-mega');
       this.flash('#ffd24d');
+    }
+
+    // #36/#35 новизна против скуки: каждые ~35–55с — смена темы/погоды (новая
+    // палитра = дофамин для СДВГ). Если игрок «закис» (высокий комбо + давно без
+    // аварии = слишком легко) — новизну подаём раньше + золотая волна как вызов.
+    if (this.nextNovelty < 0) this.nextNovelty = t + 35 + Math.random() * 20;
+    const comfortable = this.combo > 30 && (t - this.lastCrashT) > 22;
+    if (!this.paused && (t >= this.nextNovelty || (comfortable && t >= this.nextNovelty - 15))) {
+      this.nextNovelty = t + 35 + Math.random() * 20;
+      this.themeIndex = (this.themeIndex + 1) % THEMES.length;
+      const th = THEMES[this.themeIndex];
+      this.world.applyTheme(th);
+      this.pop(`🎨 ${th.name}`, 'pop-theme');
+      if (comfortable) this.goldenUntil = Math.max(this.goldenUntil, t + 3); // вызов+награда заскучавшему
     }
 
     // #15/#16/#41 бит-огибающая доли (1 на удар → спад) — единый пульс для
