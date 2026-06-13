@@ -9,7 +9,15 @@ export class Sfx {
   private pool: Tone.Synth[] = [];
   private next = 0;
   private lastAt = 0;
+  private lastSchedule = 0; // монотонное время планирования — Tone не терпит дублей
   private thud: Tone.Synth;
+
+  /** Время не раньше предыдущего запланированного + зазор — иначе Tone кидает. */
+  private slot(base: number): number {
+    const t = Math.max(base, this.lastSchedule + 0.01);
+    this.lastSchedule = t;
+    return t;
+  }
 
   /**
    * Смещение громкости эффектов в дБ поверх базовой. Музыка управляется
@@ -64,14 +72,14 @@ export class Sfx {
     const now = Tone.now();
     [84, 88, 91, 96].forEach((m, k) => {
       const synth = this.pool[this.next++ % this.pool.length];
-      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.12, now + k * 0.07);
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.12, this.slot(now + k * 0.07));
     });
   }
 
   /** Щелчок барабана слот-машины. */
   tick() {
     const synth = this.pool[this.next++ % this.pool.length];
-    synth.triggerAttackRelease(1750, 0.018);
+    synth.triggerAttackRelease(1750, 0.018, this.slot(Tone.now()));
   }
 
   /** Мистери-блок: две быстрые «блёстки». */
@@ -79,7 +87,7 @@ export class Sfx {
     const now = Tone.now();
     [89, 94].forEach((m, k) => {
       const synth = this.pool[this.next++ % this.pool.length];
-      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, now + k * 0.05);
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, this.slot(now + k * 0.05));
     });
   }
 

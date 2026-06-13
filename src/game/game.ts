@@ -5,9 +5,12 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { Player } from 'midi-gen/audio';
 import { IS_MOBILE } from '../platform';
-import { World } from './world';
+import { World, THEMES, type WorldTheme } from './world';
 import { buildCar } from './car';
-import { Blocks, LANE_COLORS, LANE_CSS, type Difficulty, type BlockExtras } from './blocks';
+import {
+  Blocks, LANE_COLORS, LANE_CSS, POWER_COLOR, POWER_CSS,
+  type Difficulty, type BlockExtras,
+} from './blocks';
 import { makeGate } from './gate';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
@@ -22,7 +25,7 @@ export class Game {
   private composer: EffectComposer | null = null;
   private camera: THREE.PerspectiveCamera;
   private world: World;
-  private car = buildCar();
+  private car: THREE.Group;
   private blocks: Blocks;
   private traffic: Traffic;
   private invulnUntil = -1; // после удара — 1.5 с неуязвимости
@@ -40,17 +43,34 @@ export class Game {
   maxCombo = 0;
   collected = 0;
   bonusNotes = 0; // валюта сверх собранных блоков: джекпоты, мистери
+  // статы заезда для миссий
+  magnetsGot = 0;
+  mysteryGot = 0;
+  goldGot = 0;
+  private lastCrashT = 0;
+  noCrashSec = 0; // максимальный отрезок без аварии
+  perfects = 0; // сколько собрано в центре полосы — для grade-фидбека
+  // DDA-интенсивность: кольцо последних попаданий/промахов + комбо.
+  // Двунаправленно: жжёшь — гуще блоки и трафик, мажешь — реже.
+  private hitRing: number[] = [];
+  private intensity = 0.6;
   private missStreak = 0;
   private missLimit: number;
   /** Fever-уровни: x15/x30/x50 комбо → множитель ×2/×3/×4. */
   private feverLevel = 0;
   private get fever() { return this.feverLevel > 0; }
   private magnetUntil = -1; // время музыки, до которого активен магнит
+  private doubleUntil = -1; // время музыки, до которого активен ×2 за пикап
+  private shielded = false; // щит: следующая авария без штрафа
   private hitStop = 0; // сек заморозки мира — продаёт вес удара
   private bloomPass: UnrealBloomPass | null = null;
   private bpm: number;
   private bestScore: number; // глобальный рекорд — призрак-цель в HUD
   private recordBroken = false;
+  private themeIndex = 0; // клавиша 0 перебирает темы оформления на лету
+  private tailMat: THREE.MeshStandardMaterial | null = null;
+  private tailGlows: THREE.Sprite[] = []; // ореолы свечения фар
+  private prevSpeed = 0; // для определения торможения (яркость задней фары)
   // финиш: камера остаётся у ворот, машина катится по инерции и плавно тормозит
   private finished = false;
   private coastV = 0;
@@ -74,13 +94,30 @@ export class Game {
     private player: Player,
     diff: Difficulty = 'norm',
     private audioOffset = 0, // сек; калибровка из меню
-    extras: BlockExtras & { lucky?: boolean; best?: number } = { gold: false, mystery: 0 },
+    extras: BlockExtras & {
+      lucky?: boolean; best?: number; carColor?: number; theme?: WorldTheme;
+    } = { gold: false, mystery: 0 },
   ) {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.bpm = song.bpm;
     this.bestScore = extras.best ?? 0;
-    this.world = new World((z) => level.heightAt(-z), (z) => level.curveAt(-z));
+    this.car = buildCar({ color: extras.carColor ?? 0x6b1220 });
+    this.world = new World(
+      (z) => level.heightAt(-z), (z) => level.curveAt(-z), extras.theme,
+    );
+    if (extras.theme) this.themeIndex = Math.max(0, THEMES.indexOf(extras.theme));
+    // кеш материала задней фары (обе фары делят один материал) и glow-ореолов
+    const tailMesh = this.car.getObjectByName('taillight') as THREE.Mesh | null;
+    this.tailMat = (tailMesh?.material as THREE.MeshStandardMaterial) ?? null;
+    this.car.traverse((o) => {
+      if (o.name === 'tailglow' && o instanceof THREE.Sprite) this.tailGlows.push(o);
+    });
     this.blocks = new Blocks(song, level, diff, extras);
+    // название темы — короткий ярлык новизны на старте
+    if (extras.theme)
+      setTimeout(() => {
+        if (!this.disposed) this.pop(extras.theme!.name, 'pop-theme');
+      }, 500);
     // удачный заезд объявляем, когда машина уже едет
     if (extras.lucky)
       setTimeout(() => {
@@ -173,6 +210,13 @@ export class Game {
 
   private onKey = (e: KeyboardEvent) => {
     if (e.code === 'KeyC') this.firstPerson = !this.firstPerson; // физ. клавиша — любая раскладка
+    if (e.code === 'Digit0' || e.code === 'Numpad0') {
+      // перебор тем оформления на лету — посмотреть снег/дождь/рассвет/закат
+      this.themeIndex = (this.themeIndex + 1) % THEMES.length;
+      const th = THEMES[this.themeIndex];
+      this.world.applyTheme(th);
+      this.pop(`🎨 ${th.name}`, 'pop-theme');
+    }
   };
 
   /** Цветная вспышка у машины. */
@@ -260,6 +304,37 @@ export class Game {
     (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
   }
 
+  /** Кольцо попал/мимо для hit-rate (вызывается на каждый блок/промах). */
+  private trackHit(hit: boolean) {
+    this.hitRing.push(hit ? 1 : 0);
+    if (this.hitRing.length > 22) this.hitRing.shift();
+  }
+
+  /**
+   * Адаптивная интенсивность по hit-rate + комбо. Высокая — гуще блоки и
+   * трафик (на харде / когда жжёшь — веселее), низкая — реже и то и другое
+   * (явно не справляешься — меньше преград). Финал трека эскалирует вверх.
+   * Тайминги-окна не трогаем — доверие к ритму.
+   */
+  private updateIntensity(t: number, dt: number) {
+    let target: number;
+    if (this.hitRing.length < 8) {
+      target = 0.6; // мало данных — нейтральная плотность
+    } else {
+      const rate = this.hitRing.reduce((a, b) => a + b, 0) / this.hitRing.length;
+      // hit-rate 0.45→0.95 → 0..1, плюс вклад комбо (до +0.25)
+      const perf = Math.max(0, Math.min(1, (rate - 0.45) / 0.5));
+      const comboBoost = Math.min(this.combo / 25, 1) * 0.25;
+      target = Math.max(0.35, Math.min(1, perf * 0.8 + 0.2 + comboBoost));
+    }
+    // финальная эскалация: последние 20% трека тянем к максимуму (кульминация)
+    const frac = t / this.level.durationSec;
+    if (frac > 0.8) target = Math.max(target, 0.8 + (frac - 0.8) / 0.2 * 0.2);
+    this.intensity += (target - this.intensity) * Math.min(1, dt * 0.8); // плавно ~1.3с
+    this.blocks.setDensity(0.55 + this.intensity * 0.45); // 0.55..1.0
+    this.traffic.setIntensity(this.intensity);
+  }
+
   /** Церемония рекорда на финише: золотой салют вокруг машины. */
   celebrate() {
     const gold = new THREE.Color('#ffd24d');
@@ -329,9 +404,24 @@ export class Game {
     if (!this.finished && t >= this.level.durationSec - 0.03) {
       this.finished = true;
       this.coastV = this.level.speedAt(this.level.durationSec - 0.2);
-      // тормозим — задние фонари ярче
-      const tail = this.car.getObjectByName('taillight') as THREE.Mesh | null;
-      if (tail) (tail.material as THREE.MeshStandardMaterial).emissiveIntensity = 5;
+    }
+
+    // задняя фара: тусклый ночной габарит, ярче при торможении/замедлении.
+    // меняем и накал линзы, и мягкий ореол (растёт при стопе) — «в тумане»
+    if (this.tailMat) {
+      const v = this.level.speedAt(t);
+      const decel = Math.max(0, (this.prevSpeed - v) / Math.max(dt, 1e-3));
+      this.prevSpeed = v;
+      const brake = this.finished ? 1 : Math.min(decel / 3.5, 1); // 0..1
+      const target = 0.8 + brake * 2.8;
+      this.tailMat.emissiveIntensity +=
+        (target - this.tailMat.emissiveIntensity) * Math.min(1, dt * 9);
+      const glow = 0.28 + brake * 0.4;
+      const sc = 1 + brake * 0.45;
+      for (const s of this.tailGlows) {
+        s.material.opacity += (glow - s.material.opacity) * Math.min(1, dt * 9);
+        s.scale.set(1.15 * sc, 0.85 * sc, 1);
+      }
     }
     let dist: number;
     if (this.finished && !this.paused) {
@@ -386,11 +476,11 @@ export class Game {
       this.camera.lookAt(cx + this.carX, y + 0.8, -dist);
     } else if (this.firstPerson) {
       // вид водителя: камера у лобового, чуть перед стеклом (стекло непрозрачное)
-      this.camera.position.set(cx + this.carX + shX * 0.5, y + 1.16 + shY * 0.5, -dist - 0.95);
+      this.camera.position.set(cx + this.carX + shX * 0.5, y + 1.4 + shY * 0.5, -dist - 0.95);
       const look = 22;
       this.camera.lookAt(
         this.level.curveAt(dist + look) + this.carX,
-        this.level.heightAt(dist + look) + 1.1,
+        this.level.heightAt(dist + look) + 1.25,
         -dist - look,
       );
     } else {
@@ -412,17 +502,30 @@ export class Game {
     const magnetActive = t < this.magnetUntil;
     this.blocks.update(
       dist, cx + this.carX, t, dt, this.fever, magnetActive,
-      (b) => {
+      (b, perfect) => {
         if (b.kind === 'magnet') {
-          this.magnetUntil = t + 8;
+          const power = b.power ?? 'magnet';
+          this.magnetsGot++; // засчитываем как пойманный пикап (миссия «магниты»)
           this.score += 50;
-          this.pop('🧲 МАГНИТ!', 'pop-combo pop-super');
-          this.particles.burst(b.x, b.y, -b.dist, new THREE.Color('#ffd24d'), 30);
+          if (power === 'shield') {
+            this.shielded = true;
+            this.pop('🛡 ЩИТ!', 'pop-combo pop-super');
+          } else if (power === 'double') {
+            this.doubleUntil = t + 10;
+            this.pop('✖2 ОЧКИ x2!', 'pop-combo pop-super');
+          } else {
+            this.magnetUntil = t + 8;
+            this.pop('🧲 МАГНИТ!', 'pop-combo pop-super');
+          }
+          this.particles.burst(b.x, b.y, -b.dist, POWER_COLOR[power], 30);
+          this.flash(POWER_CSS[power]);
           this.shake = Math.min(0.5, this.shake + 0.2);
+          this.scoreBump();
           return;
         }
         if (b.kind === 'gold') {
           // джекпот: куш растёт с комбо — поймать на высоком стрике вкуснее
+          this.goldGot++;
           const pts = Math.round((100 + this.combo * 6) * (1 + this.feverLevel));
           this.score += pts;
           this.bonusNotes += 25;
@@ -437,6 +540,7 @@ export class Game {
         }
         if (b.kind === 'mystery') {
           // содержимое неизвестно до подбора — variable-ratio в чистом виде
+          this.mysteryGot++;
           const r = Math.random();
           if (r < 0.45) {
             const pts = Math.round((40 + this.combo * 4) * (1 + this.feverLevel));
@@ -465,17 +569,25 @@ export class Game {
         this.combo++;
         this.maxCombo = Math.max(this.maxCombo, this.combo);
         this.collected++;
+        this.trackHit(true);
+        // grading: PERFECT (центр полосы) даёт +20% и золотую искру
+        if (perfect) this.perfects++;
+        const grade = perfect ? 1.2 : 1;
+        const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
         const pts = Math.round(
           (10 + (b.vel / 127) * 10) * b.count *
-          (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel),
+          (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl,
         );
         this.score += pts;
         this.sfx.collect(this.combo, this.fever, b.count);
         this.scoreBump();
         const milestone = this.popFx();
-        // искры — на каждый блок; вспышка и тряска — только на события,
-        // иначе на длинной сессии глаз выгорает и события не читаются
+        // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
         this.particles.burst(b.x, b.y, -b.dist, LANE_COLORS[b.lane + 1], 12 + b.count * 6);
+        if (perfect) {
+          this.particles.burst(b.x, b.y + 0.3, -b.dist, new THREE.Color('#ffe9a0'), 8);
+          if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
+        }
         if (milestone) {
           this.flash(LANE_CSS[b.lane + 1]);
           this.shake = Math.min(0.45, this.shake + 0.3);
@@ -487,6 +599,7 @@ export class Game {
       },
       () => {
         // прощающее комбо: одиночный промах — тишина
+        this.trackHit(false);
         this.missStreak++;
         if (this.missStreak >= this.missLimit && this.combo > 0) {
           this.missStreak = 0;
@@ -496,19 +609,43 @@ export class Game {
       },
     );
 
-    // трафик: столкновение = откат комбо и штраф, но не смерть
-    const hitObs = this.traffic.update(t, this.level, dist, cx + this.carX);
+    // адаптивная интенсивность: плотность блоков и трафика по игре + финал
+    if (!this.finished) this.updateIntensity(t, dt);
+
+    // трафик: столкновение = откат комбо и штраф; near-miss = бонус за риск
+    const { collided: hitObs, grazed } = this.traffic.update(t, this.level, dist, cx + this.carX);
+    if (grazed && !hitObs) {
+      this.score += 25;
+      this.bonusNotes += 2;
+      this.pop('+25 РИСК!', 'pop-combo pop-risk');
+      this.scoreBump();
+    }
     if (hitObs && t > this.invulnUntil) {
       this.invulnUntil = t + 1.5;
-      this.missStreak = 0;
-      this.breakCombo();
-      this.score = Math.max(0, this.score - 50);
-      this.sfx.crash();
-      this.pop('💥', 'pop-combo pop-crash');
-      this.flash('#ff4433');
-      this.shake = 0.8;
-      this.hitStop = 0.09;
+      if (this.shielded) {
+        // щит поглощает удар: комбо и очки целы, без штрафа
+        this.shielded = false;
+        this.pop('🛡 ЩИТ СПАС!', 'pop-combo pop-super');
+        this.flash('#44d6ff');
+        this.shake = Math.min(0.5, this.shake + 0.3);
+        this.particles.burst(this.car.position.x, this.car.position.y + 0.8,
+          this.car.position.z, new THREE.Color('#44d6ff'), 30);
+      } else {
+        this.missStreak = 0;
+        this.breakCombo();
+        this.score = Math.max(0, this.score - 50);
+        this.sfx.crash();
+        this.pop('💥', 'pop-combo pop-crash');
+        this.flash('#ff4433');
+        this.shake = 0.8;
+        this.hitStop = 0.09;
+        this.lastCrashT = t;
+        // авария — явный сигнал «тяжело»: роняем интенсивность
+        this.trackHit(false); this.trackHit(false); this.trackHit(false);
+      }
     }
+    // самый длинный отрезок без аварии — для миссии «N с без аварий»
+    if (!this.finished) this.noCrashSec = Math.max(this.noCrashSec, t - this.lastCrashT);
 
     // микроцель: полоска до следующей вехи комбо
     const milestones = [0, 5, 10, 15, 20, 30, 50];
@@ -543,6 +680,8 @@ export class Game {
       `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
       `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
       `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
+      `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
+      `${this.shielded ? ' · 🛡' : ''}` +
       recPart +
       ` · ${kmh} км/ч · ${fmt(t)} / ${fmt(this.level.durationSec)}`;
 

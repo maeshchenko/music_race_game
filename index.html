@@ -81,7 +81,11 @@
         text-shadow: 0 0 8px rgba(255, 165, 77, 0.6);
       }
       button:hover { background: rgba(255, 165, 77, 0.12); }
-      .simple-panel { text-align: center; }
+      .simple-panel { text-align: center; position: relative; z-index: 1; }
+      /* снег в меню — канвас за панелью */
+      .menu-snow {
+        position: absolute; inset: 0; z-index: 0; pointer-events: none;
+      }
       .presents {
         color: var(--concrete); font-size: 0.85rem; letter-spacing: 0.55em;
         text-shadow: 0 0 10px rgba(0, 0, 0, 0.8);
@@ -208,6 +212,31 @@
       .res-slot.slot-win .slot-total, .res-slot.slot-win .slot-cell {
         color: #4dffae; text-shadow: 0 0 12px #0fa;
       }
+      /* XP-полоса игрока */
+      .res-xp { margin-top: 0.7rem; color: #aef; font-size: 0.9rem;
+        display: flex; align-items: center; gap: 0.6rem; justify-content: center; }
+      .xp-bar { display: inline-block; width: 12rem; height: 7px;
+        background: rgba(255, 255, 255, 0.14); border: 1px solid #2a4a5a; }
+      .xp-fill { display: block; height: 100%; width: 0;
+        background: linear-gradient(90deg, #22ffee, #3a7bff);
+        box-shadow: 0 0 8px #22ffee; transition: width 0.8s ease-out; }
+      .res-levelup { margin-top: 0.5rem; color: #ffd24d; font-size: 1.05rem;
+        text-shadow: 0 0 12px #fa0; animation: pop-shake 0.5s ease-in-out; }
+      /* миссии */
+      .res-missions { margin-top: 0.6rem; display: flex; flex-direction: column;
+        gap: 0.2rem; font-size: 0.85rem; color: #c9ccd2; }
+      .res-mission { display: flex; gap: 0.5rem; justify-content: center; align-items: baseline; }
+      .res-mission.just-done { color: #4dffae; text-shadow: 0 0 10px #0fa;
+        animation: pop-shake 0.4s ease-in-out; }
+      .res-mission .m-prog { color: #8a8d94; font-size: 0.78rem; }
+      .res-set { margin-top: 0.45rem; color: #ffd24d; font-size: 0.95rem;
+        text-shadow: 0 0 10px #fa0; }
+      /* до анлока скина */
+      .res-unlock { margin-top: 0.55rem; color: #b9bec6; font-size: 0.82rem; }
+      .unlock-bar { margin-top: 0.25rem; width: 13rem; height: 5px; margin-inline: auto;
+        background: rgba(255, 255, 255, 0.12); border: 1px solid #3a3d45; }
+      .unlock-bar > div { height: 100%; background: linear-gradient(90deg, #b8a060, #ffd24d);
+        box-shadow: 0 0 6px #ffd24d; transition: width 0.6s; }
       .res-next { margin-top: 0.9rem; color: #c9ccd2; font-size: 0.95rem; }
       .res-next #cnt { color: var(--sodium); font-size: 1.2rem; }
       .results-overlay button { pointer-events: auto; }
@@ -218,6 +247,66 @@
         animation: pop-shake 0.4s ease-in-out;
       }
       .hint { margin-top: 1.3rem; color: #565963; font-size: 0.72rem; letter-spacing: 0.1em; }
+      /* шапка меню: баланс/уровень + кнопка гаража с бейджем капсул */
+      .menu-meta { margin-top: 1.4rem; display: flex; align-items: center;
+        justify-content: center; gap: 1rem; }
+      .menu-bal { color: #ffd24d; font-size: 0.9rem; letter-spacing: 0.12em;
+        text-shadow: 0 0 8px rgba(255, 210, 77, 0.4); }
+      .cap-badge { background: #ff44ff; color: #fff; border-radius: 50%;
+        padding: 0 0.35rem; font-size: 0.7rem; margin-left: 0.3rem;
+        box-shadow: 0 0 8px #ff44ff; }
+      /* гараж */
+      .garage-panel { max-width: 44rem; }
+      .cap-btn { font-size: 1rem; padding: 0.7rem 2rem; margin-top: 1rem;
+        animation: cap-glow 1.2s ease-in-out infinite alternate; }
+      @keyframes cap-glow {
+        from { box-shadow: 0 0 12px rgba(255, 68, 255, 0.4); }
+        to { box-shadow: 0 0 28px rgba(255, 68, 255, 0.8); }
+      }
+      .skins-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem;
+        margin: 1.3rem 0; }
+      .skin-card { border: 1px solid #3a3d45; padding: 0.6rem 0.4rem; cursor: pointer;
+        text-align: center; transition: border-color 0.2s, transform 0.1s; }
+      .skin-card:hover { border-color: #6a6d75; transform: translateY(-2px); }
+      .skin-card.owned { border-color: #5a6d5a; }
+      .skin-card.equipped { border-color: var(--sodium);
+        box-shadow: 0 0 12px rgba(255, 165, 77, 0.4); }
+      .skin-card { border-top: 2px solid var(--rar, #3a3d45); }
+      .skin-swatch { width: 100%; height: 38px; border-radius: 3px; margin-bottom: 0.4rem;
+        box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.6); }
+      .skin-rarity { font-size: 0.6rem; letter-spacing: 0.15em; margin-bottom: 0.15rem; }
+      .skin-name { font-size: 0.72rem; color: #c9ccd2; }
+      .skin-act { font-size: 0.7rem; color: var(--sodium); margin-top: 0.3rem; }
+      .skin-card.owned:not(.equipped) .skin-act { color: #7da37d; }
+      /* вскрытие капсулы */
+      .capsule-fx { position: absolute; inset: 0; z-index: 20;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(10, 11, 15, 0.82); cursor: pointer; }
+      .capsule-box { font-size: 6rem; animation: cap-shake 0.7s ease-in-out; }
+      .capsule-box.burst { animation: cap-burst 0.3s ease-out forwards; }
+      @keyframes cap-shake {
+        0%, 100% { transform: rotate(0); }
+        20% { transform: rotate(-12deg) scale(1.05); }
+        40% { transform: rotate(12deg) scale(1.1); }
+        60% { transform: rotate(-10deg) scale(1.12); }
+        80% { transform: rotate(8deg) scale(1.15); }
+      }
+      @keyframes cap-burst {
+        0% { transform: scale(1.15); opacity: 1; }
+        100% { transform: scale(2.4); opacity: 0; }
+      }
+      .capsule-result { text-align: center; line-height: 1.5;
+        border: 2px solid #ffd24d; padding: 1.4rem 2.4rem;
+        background: rgba(16, 17, 23, 0.9);
+        box-shadow: 0 0 30px var(--rar, #ffd24d);
+        animation: pop-shake 0.5s ease-in-out; }
+      .cap-swatch { width: 7rem; height: 3.4rem; margin: 0 auto 0.7rem; border-radius: 4px;
+        box-shadow: inset 0 0 14px rgba(0,0,0,0.6), 0 0 18px var(--rar, #fff); }
+      .cap-rarity { font-size: 0.85rem; letter-spacing: 0.3em; }
+      .cap-skin-name { font-size: 2rem; font-weight: bold; margin: 0.2rem 0;
+        text-shadow: 0 0 16px currentColor; }
+      .cap-tag { font-size: 1rem; color: #4dffae; text-shadow: 0 0 10px #0fa; margin-top: 0.3rem; }
+      .cap-tag.cap-dupe { color: #ffd24d; text-shadow: 0 0 10px #fa0; }
       .hud {
         position: absolute; top: 1rem; left: 1.2rem; z-index: 5;
         color: #c9ccd2; font-size: 0.9rem; letter-spacing: 0.12em;
@@ -267,6 +356,27 @@
         color: #fff; font-size: 2.4rem;
         text-shadow: 0 0 10px #fff, 0 0 26px #ff44ff, 0 0 50px #22ffee;
       }
+      .pop-perfect {
+        color: #ffe9a0; font-size: 1.2rem; bottom: 46%;
+        text-shadow: 0 0 8px #fd0, 0 0 18px #fa0; letter-spacing: 0.2em;
+      }
+      .pop-risk {
+        color: #ff8a3d; font-size: 1.5rem;
+        text-shadow: 0 0 8px #f60, 0 0 20px #f30;
+      }
+      .pop-theme {
+        color: #c9ccd2; font-size: 1.1rem; bottom: 60%;
+        letter-spacing: 0.35em; text-transform: uppercase;
+        text-shadow: 0 0 10px rgba(0,0,0,0.9);
+      }
+      .fs-toast {
+        position: absolute; bottom: 1.4rem; left: 50%; transform: translateX(-50%);
+        z-index: 12; padding: 0.5rem 1.2rem;
+        background: rgba(16, 17, 23, 0.85); border: 1px solid var(--concrete);
+        color: #c9ccd2; font-size: 0.8rem; letter-spacing: 0.12em;
+        pointer-events: none; opacity: 0; transition: opacity 0.4s;
+      }
+      .fs-toast.show { opacity: 1; }
       .pop-lost {
         color: #8a8d94; font-size: 1.3rem;
         text-shadow: 0 0 8px #000;

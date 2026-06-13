@@ -21,9 +21,11 @@ const DIFF_CFG: Record<Difficulty, {
   maxPerSec: number; // кап плотности блоков
   farJump: boolean; // разрешён ли прыжок край→край
 }> = {
-  light: { rolesPerBar: 1, laneShiftGap: 0.8, maxPerSec: 1.5, farJump: false },
-  norm: { rolesPerBar: 1, laneShiftGap: 0.55, maxPerSec: 2.5, farJump: false },
-  hard: { rolesPerBar: 2, laneShiftGap: 0.4, maxPerSec: 4, farJump: true },
+  // генерим с запасом — интенсивность прореживает вниз при провале (см. setDensity),
+  // на полной интенсивности (жжёшь / хард) поток гуще = веселее
+  light: { rolesPerBar: 1, laneShiftGap: 0.7, maxPerSec: 2.2, farJump: false },
+  norm: { rolesPerBar: 1, laneShiftGap: 0.5, maxPerSec: 3.4, farJump: false },
+  hard: { rolesPerBar: 2, laneShiftGap: 0.38, maxPerSec: 5.5, farJump: true },
 };
 
 const FAR_JUMP_COOLDOWN = 15; // с
@@ -43,10 +45,16 @@ export interface BlockDef {
   vel: number;
   /** Сколько нот склеено: множитель очков (кап 3) и размера. */
   count: number;
-  /** Нота, бонус-магнит, золотой джекпот или мистери-«?». */
+  /** Нота, бонус-пикап, золотой джекпот или мистери-«?». */
   kind: 'note' | 'magnet' | 'gold' | 'mystery';
+  /** Для пикапа (kind='magnet'): какая способность. */
+  power?: 'magnet' | 'shield' | 'double';
   collected: boolean;
   missed: boolean;
+  /** DDA: блок убран прорежением — не собирается и не считается промахом. */
+  dropped?: boolean;
+  /** Решение о прорежении принято (один раз, при входе в ближнюю зону). */
+  decided?: boolean;
 }
 
 /** Казино-слой: есть ли в заезде золотой джекпот и сколько мистери-блоков. */
@@ -58,6 +66,15 @@ export interface BlockExtras {
 const MAGNET_COLOR = new THREE.Color('#ffd24d');
 const GOLD_COLOR = new THREE.Color('#fff3a0');
 const MYSTERY_COLOR = new THREE.Color('#ffffff');
+/** Цвет пикапа по способности. */
+export const POWER_COLOR: Record<string, THREE.Color> = {
+  magnet: new THREE.Color('#ffd24d'),
+  shield: new THREE.Color('#44d6ff'),
+  double: new THREE.Color('#ff66cc'),
+};
+export const POWER_CSS: Record<string, string> = {
+  magnet: '#ffd24d', shield: '#44d6ff', double: '#ff66cc',
+};
 const MAGNET_EVERY = [25, 40]; // раз в столько секунд трека, случайно
 
 export class Blocks {
@@ -66,6 +83,10 @@ export class Blocks {
   private cursor = 0; // первый блок, который ещё может быть собран/пропущен
   private dummy = new THREE.Object3D();
   private colorTmp = new THREE.Color();
+  private density = 1; // DDA: 1 — все блоки, <1 — часть прорежена
+
+  /** Невидимая адаптивная сложность: доля оставляемых нот (0.55–1). */
+  setDensity(d: number) { this.density = Math.max(0.55, Math.min(1, d)); }
 
   constructor(
     song: Song, level: Level, diff: Difficulty = 'norm',
@@ -169,8 +190,9 @@ export class Blocks {
       });
     }
 
-    // бонусы-магниты: на пути потока, раз в 25–40 секунд
+    // бонусы-пикапы: на пути потока, раз в 25–40 секунд; способность случайна
     {
+      const POWERS: ('magnet' | 'shield' | 'double')[] = ['magnet', 'shield', 'double'];
       let nextAt = 12 + Math.random() * 10;
       for (let i = 1; i < stream.length; i++) {
         if (stream[i].t < nextAt) continue;
@@ -186,6 +208,7 @@ export class Blocks {
           vel: 100,
           count: 1,
           kind: 'magnet',
+          power: POWERS[Math.floor(Math.random() * POWERS.length)],
           collected: false,
           missed: false,
         });
@@ -232,7 +255,7 @@ export class Blocks {
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);
       this.mesh.setColorAt(i,
-        b.kind === 'magnet' ? MAGNET_COLOR
+        b.kind === 'magnet' ? (POWER_COLOR[b.power ?? 'magnet'] ?? MAGNET_COLOR)
         : b.kind === 'gold' ? GOLD_COLOR
         : b.kind === 'mystery' ? MYSTERY_COLOR
         : LANE_COLORS[b.lane + 1]);
@@ -270,14 +293,35 @@ export class Blocks {
   update(
     carDist: number, carWorldX: number, time: number, dt: number, fever: boolean,
     magnet: boolean,
-    onCollect: (b: BlockDef) => void, onMiss: () => void,
+    onCollect: (b: BlockDef, perfect: boolean) => void, onMiss: () => void,
   ) {
-    // пропущенные позади (бонус-магнит промахом не считается)
+    // DDA-прорежение: при входе нот-блока в ближнюю зону (~50 м) решаем
+    // оставить или убрать — детерминированно по индексу, чтобы не дёргалось.
+    // Прорежение чинит трудный момент незаметно (принцип EndeavorRx).
+    if (this.density < 1) {
+      for (let i = this.cursor; i < this.defs.length; i++) {
+        const b = this.defs[i];
+        if (b.dist > carDist + 50) break;
+        if (b.decided || b.kind !== 'note' || b.collected || b.missed) continue;
+        b.decided = true;
+        // хэш индекса в [0,1): убираем долю (1-density) самых «лишних»
+        const h = ((i * 2654435761) >>> 0) / 4294967296;
+        if (h > this.density) {
+          b.dropped = true;
+          this.dummy.position.set(b.x, b.y, -b.dist);
+          this.dummy.scale.setScalar(0.0001);
+          this.dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this.dummy.matrix);
+        }
+      }
+    }
+
+    // пропущенные позади (бонус-магнит и прореженные промахом не считаются)
     while (this.cursor < this.defs.length && this.defs[this.cursor].dist < carDist - 2.5) {
       const b = this.defs[this.cursor];
       if (!b.collected && !b.missed) {
         b.missed = true;
-        if (b.kind === 'note') onMiss();
+        if (b.kind === 'note' && !b.dropped) onMiss();
       }
       this.cursor++;
     }
@@ -297,10 +341,13 @@ export class Blocks {
     for (let i = this.cursor; i < this.defs.length; i++) {
       const b = this.defs[i];
       if (b.dist > carDist + 2.0) break;
-      if (!b.collected && !b.missed &&
+      if (!b.collected && !b.missed && !b.dropped &&
           b.dist <= carDist + 1.2 && Math.abs(b.x - carWorldX) < COLLECT_LATERAL) {
         b.collected = true;
-        onCollect(b);
+        // grading: попадание в центр полосы блока = PERFECT (непрерывная
+        // ось мастерства — всегда видно, что оптимизировать)
+        const perfect = Math.abs(b.x - carWorldX) < COLLECT_LATERAL * 0.42;
+        onCollect(b, perfect);
         this.dummy.position.set(b.x, b.y, -b.dist);
         this.dummy.scale.setScalar(0.0001);
         this.dummy.updateMatrix();
@@ -314,7 +361,7 @@ export class Blocks {
     for (let i = this.cursor; i < this.defs.length; i++) {
       const b = this.defs[i];
       if (b.dist > carDist + 170) break;
-      if (b.collected) continue;
+      if (b.collected || b.dropped) continue;
       this.dummy.position.set(b.x, b.y, -b.dist);
       if (b.kind === 'magnet') {
         // бонус крутится заметно быстрее и крупнее

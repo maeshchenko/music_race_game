@@ -20,10 +20,13 @@ export interface Level {
   curveAt(dist: number): number;
 }
 
-const SPEED_PER_BPM = 0.165; // м/с на единицу BPM
+// скорость = база + bpm·коэф: компрессия, чтобы быстрые треки (BPM 150+) не
+// улетали в 250 км/ч, а типичные ~100 BPM давали ~110 на прямой
+const SPEED_BASE = 22; // м/с при 0 BPM
+const SPEED_PER_BPM = 0.06; // прибавка м/с на единицу BPM
 const DS = 4; // шаг сетки дороги, м
 const SIM_DT = 0.05; // шаг симуляции скорости, с
-const A_LAT = 4.0; // допустимое боковое ускорение в повороте, м/с²
+const A_LAT = 7.0; // допустимое боковое ускорение в повороте, м/с² (выше — меньше режет)
 
 /** Детерминированный PRNG из сида трека — трасса у кода всегда одна. */
 function lcg(seed: number): () => number {
@@ -62,7 +65,7 @@ export function buildLevel(song: Song): Level {
 
   // --- дорога: сегментные профили кривизны и уклона --------------------
 
-  const vBase = song.bpm * SPEED_PER_BPM;
+  const vBase = SPEED_BASE + song.bpm * SPEED_PER_BPM;
   const maxDist = vBase * 1.9 * durationSec + 800;
   const n = Math.ceil(maxDist / DS) + 2;
   const kap = new Float32Array(n); // кривизна, 1/м
@@ -154,7 +157,7 @@ export function buildLevel(song: Song): Level {
       vLim = Math.min(vLim, Math.sqrt(A_LAT / Math.max(kHere, 1e-5)));
       vLim *= clamp(1 - g * 6, 0.55, 1.4); // в гору медленнее, с горы быстрее
       const kDyn = v > vLim ? 1.6 : 0.35; // тормоз злее разгона
-      const a = clamp(kDyn * (vLim - v) - 9.8 * g, -7, 3.2);
+      const a = clamp(kDyn * (vLim - v) - 9.8 * g, -8, 5);
       v = Math.max(6, v + a * SIM_DT);
       s += v * SIM_DT;
     }

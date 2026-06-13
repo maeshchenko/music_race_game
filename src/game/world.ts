@@ -19,6 +19,50 @@ export type HeightFn = (z: number) => number;
 /** Боковое смещение оси дороги в точке z — повороты. */
 export type CurveFn = (z: number) => number;
 
+/**
+ * Тема заезда: палитра неба и фонарей + погода. Новизна каждый заезд —
+ * дофаминергична для СДВГ. Цвета фонарей держим тёплыми/холодно-белыми,
+ * чтобы не конфликтовать с сигнальными цветами блоков (cyan/magenta/lime).
+ */
+export interface WorldTheme {
+  name: string;
+  fog: number; // цвет тумана и фона
+  fogNear: number;
+  fogFar: number;
+  hemiSky: number;
+  hemiGround: number;
+  hemiIntensity?: number; // яркость неба: ночь ~1.0, рассвет/закат выше
+  lamp: number; // фонари: головка, конус, пятно, прожектор
+  precip: 'snow' | 'rain' | 'clear';
+  precipColor: number;
+}
+
+export const THEMES: WorldTheme[] = [
+  { name: 'снежная ночь', fog: 0x252834, fogNear: 25, fogFar: 230,
+    hemiSky: 0x5a648a, hemiGround: 0x1c1c24, lamp: 0xffa54d, precip: 'snow', precipColor: 0xd6dbe4 },
+  { name: 'ясная ночь', fog: 0x10131f, fogNear: 35, fogFar: 320,
+    hemiSky: 0x46506e, hemiGround: 0x14141c, lamp: 0xffb060, precip: 'clear', precipColor: 0xd6dbe4 },
+  { name: 'туман', fog: 0x2b2e35, fogNear: 14, fogFar: 150,
+    hemiSky: 0x6a6e7a, hemiGround: 0x24262b, lamp: 0xe8dcc0, precip: 'snow', precipColor: 0xc8cdd6 },
+  { name: 'дождь', fog: 0x1a1e26, fogNear: 20, fogFar: 200,
+    hemiSky: 0x49526a, hemiGround: 0x181a22, lamp: 0xffc070, precip: 'rain', precipColor: 0x9fb0c8 },
+  { name: 'морозная синь', fog: 0x1a2230, fogNear: 28, fogFar: 250,
+    hemiSky: 0x4a6088, hemiGround: 0x16202c, lamp: 0xcfe0ff, precip: 'snow', precipColor: 0xe6eeff },
+  { name: 'розовый вечер', fog: 0x2a2230, fogNear: 26, fogFar: 240,
+    hemiSky: 0x6a5074, hemiGround: 0x201824, lamp: 0xffb890, precip: 'clear', precipColor: 0xe8d6e0 },
+  { name: 'рассвет', fog: 0x6a6e84, fogNear: 30, fogFar: 300,
+    hemiSky: 0x9aa6c4, hemiGround: 0x6a6458, hemiIntensity: 1.7, lamp: 0xffcaa0,
+    precip: 'clear', precipColor: 0xdfe4ee },
+  { name: 'закат', fog: 0x6e4a4a, fogNear: 28, fogFar: 280,
+    hemiSky: 0xc08868, hemiGround: 0x5a3a3a, hemiIntensity: 1.6, lamp: 0xffb060,
+    precip: 'clear', precipColor: 0xeed6c8 },
+  { name: 'хмурое утро', fog: 0x5a5e66, fogNear: 22, fogFar: 200,
+    hemiSky: 0x8a909c, hemiGround: 0x56585e, hemiIntensity: 1.5, lamp: 0xe8dcc0,
+    precip: 'rain', precipColor: 0xb6bcc8 },
+];
+
+export const pickTheme = (): WorldTheme => THEMES[Math.floor(Math.random() * THEMES.length)];
+
 // --- процедурная текстура панельки --------------------------------------
 
 interface BuildingKind {
@@ -126,6 +170,7 @@ export class World {
     color: 0xffa54d, transparent: true, opacity: 0.07,
     depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
+  private theme: WorldTheme;
   private poolMat = new THREE.MeshBasicMaterial({
     map: makeGlowTexture(), transparent: true, opacity: 0.85,
     depthWrite: false, blending: THREE.AdditiveBlending,
@@ -161,29 +206,37 @@ export class World {
   private vazColors = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
   private sharedGeos: Set<THREE.BufferGeometry>;
   private pooled: THREE.SpotLight[] = [];
-  private snow!: THREE.Points;
-  private snowVel: Float32Array;
-  private readonly SNOW_N = IS_MOBILE ? 700 : 1600;
+  private snow: THREE.Points | null = null;
+  private snowVel: Float32Array = new Float32Array(0);
+  private SNOW_N: number;
   private readonly SNOW_BOX = new THREE.Vector3(50, 22, 70);
+  private hemi: THREE.HemisphereLight;
 
   constructor(
     private hAt: HeightFn = () => 0,
     private cAt: CurveFn = () => 0,
+    theme: WorldTheme = THEMES[0],
   ) {
+    this.theme = theme;
     this.sharedGeos = new Set([
       this.boxGeo, this.poleGeo, this.headGeo, this.coneGeo,
       this.firGeo, this.firSnowGeo, this.trunkGeo, this.crownGeo,
       this.garageGeo, this.garageDoorGeo, this.kioskGeo, this.kioskWinGeo,
     ]);
 
-    const fogColor = 0x252834;
-    this.scene.fog = new THREE.Fog(fogColor, 25, 230);
-    this.scene.background = new THREE.Color(fogColor);
+    const base = IS_MOBILE ? 700 : 1600;
+    this.SNOW_N = theme.precip === 'clear' ? Math.round(base * 0.25) : base;
 
-    this.scene.add(new THREE.HemisphereLight(0x5a648a, 0x1c1c24, 1.0));
+    this.scene.fog = new THREE.Fog(theme.fog, theme.fogNear, theme.fogFar);
+    this.scene.background = new THREE.Color(theme.fog);
+
+    this.hemi = new THREE.HemisphereLight(theme.hemiSky, theme.hemiGround, 1.0);
+    this.scene.add(this.hemi);
     const moon = new THREE.DirectionalLight(0x8a96b8, 0.45);
     moon.position.set(-30, 60, -20);
     this.scene.add(moon);
+
+    this.applyTheme(theme); // цвета фонарей/неба, без пересборки чанков
 
     this.kinds = [
       buildingKind(22, 15, 12, 5, 8, '#4a4742'), // хрущёвка 5 эт.
@@ -195,27 +248,62 @@ export class World {
     for (let i = 0; i < POOLED_LIGHTS; i++) {
       // конус вниз, угол как у видимого плафона: atan(2.6 / 4.8) ≈ 0.5 рад —
       // машина освещается только когда реально въезжает в пятно фонаря
-      const l = new THREE.SpotLight(0xffa860, 70, 14, 0.52, 0.55, 1.2);
+      const l = new THREE.SpotLight(theme.lamp, 70, 14, 0.52, 0.55, 1.2);
       this.scene.add(l, l.target);
       this.pooled.push(l);
     }
 
     for (let i = 0; i < CHUNKS; i++) this.chunks.push(this.makeChunk(i));
 
-    // снег — мировые координаты: хлопья только падают, машина едет сквозь
+    this.buildSnow();
+  }
+
+  /**
+   * Сменить тему на лету (клавиша 0): цвета неба/тумана/фонарей + пересборка
+   * осадков. Чанки и геометрия не трогаются — мгновенно и без рывка.
+   */
+  applyTheme(theme: WorldTheme) {
+    this.theme = theme;
+    const fog = this.scene.fog as THREE.Fog;
+    fog.color.setHex(theme.fog);
+    fog.near = theme.fogNear;
+    fog.far = theme.fogFar;
+    (this.scene.background as THREE.Color).setHex(theme.fog);
+    this.hemi.color.setHex(theme.hemiSky);
+    this.hemi.groundColor.setHex(theme.hemiGround);
+    this.hemi.intensity = theme.hemiIntensity ?? 1.0;
+    this.lampHeadMat.color.setHex(theme.lamp);
+    this.lampHeadMat.emissive.setHex(theme.lamp);
+    this.coneMat.color.setHex(theme.lamp);
+    this.poolMat.color.setHex(theme.lamp).lerp(new THREE.Color(0xffffff), 0.3);
+    for (const l of this.pooled) l.color.setHex(theme.lamp);
+    this.buildSnow();
+  }
+
+  /** (Пере)собрать осадки по текущей теме: снег пушистый / дождь быстрый. */
+  private buildSnow() {
+    if (this.snow) {
+      this.scene.remove(this.snow);
+      this.snow.geometry.dispose();
+      (this.snow.material as THREE.Material).dispose();
+    }
+    const base = IS_MOBILE ? 700 : 1600;
+    this.SNOW_N = this.theme.precip === 'clear' ? Math.round(base * 0.25) : base;
+    const isRain = this.theme.precip === 'rain';
     const pos = new Float32Array(this.SNOW_N * 3);
     this.snowVel = new Float32Array(this.SNOW_N * 2); // vy, фаза покачивания
     for (let i = 0; i < this.SNOW_N; i++) {
       pos[i * 3] = (Math.random() - 0.5) * this.SNOW_BOX.x;
       pos[i * 3 + 1] = Math.random() * this.SNOW_BOX.y;
       pos[i * 3 + 2] = 15 - Math.random() * this.SNOW_BOX.z;
-      this.snowVel[i * 2] = 1.6 + Math.random() * 1.8;
+      this.snowVel[i * 2] = isRain ? 9 + Math.random() * 5 : 1.6 + Math.random() * 1.8;
       this.snowVel[i * 2 + 1] = Math.random() * Math.PI * 2;
     }
     const snowGeo = new THREE.BufferGeometry();
     snowGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     this.snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({
-      color: 0xd6dbe4, size: 0.09, transparent: true, opacity: 0.85, sizeAttenuation: true,
+      color: this.theme.precipColor, size: isRain ? 0.06 : 0.09,
+      transparent: true, opacity: isRain ? 0.55 : 0.85, sizeAttenuation: true,
     }));
     this.snow.frustumCulled = false;
     this.scene.add(this.snow);
@@ -460,6 +548,7 @@ export class World {
     });
 
     // снег: по x/z хлопья неподвижны, падение с обёрткой бокса вокруг машины
+    if (!this.snow) return;
     const attr = this.snow.geometry.getAttribute('position') as THREE.BufferAttribute;
     const arr = attr.array as Float32Array;
     const t = performance.now() / 1000;
@@ -473,7 +562,8 @@ export class World {
       if (y < yBase) y += this.SNOW_BOX.y;
       else if (y > yBase + this.SNOW_BOX.y) y = yBase + Math.random() * this.SNOW_BOX.y;
       arr[i * 3 + 1] = y;
-      const x = arr[i * 3] + Math.sin(t * 1.3 + this.snowVel[i * 2 + 1]) * dt * 0.4;
+      const sway = this.theme.precip === 'rain' ? 0.08 : 0.4; // дождь падает прямо
+      const x = arr[i * 3] + Math.sin(t * 1.3 + this.snowVel[i * 2 + 1]) * dt * sway;
       arr[i * 3] = xMin + ((((x - xMin) % xSpan) + xSpan) % xSpan);
       const z = arr[i * 3 + 2];
       arr[i * 3 + 2] = zMin + ((((z - zMin) % zSpan) + zSpan) % zSpan);

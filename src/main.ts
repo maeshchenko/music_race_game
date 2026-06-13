@@ -17,7 +17,12 @@ import {
 } from './music';
 import { Game } from './game/game';
 import { buildLevel } from './game/level';
+import { pickTheme } from './game/world';
 import type { Difficulty } from './game/blocks';
+import {
+  meta, applyRun, openCapsule, buySkin, equipSkin, SKINS, RARITY,
+  type RunStats,
+} from './meta';
 
 /**
  * SIMPLE_MENU: единственный экран «Мижган представляет» — случайный outrun,
@@ -38,7 +43,11 @@ menu.innerHTML = SIMPLE_MENU
     <p class="presents">МИЖГАН ПРЕДСТАВЛЯЕТ ИГРУ</p>
     <div class="title-3d">2107</div>
     <button id="start" class="play-btn">ИГРАТЬ</button>
-    <p class="hint">управление — мышью · C — вид из салона · пробел — пауза</p>
+    <div class="menu-meta">
+      <button id="garage" class="small">🔧 ГАРАЖ <span id="cap-badge" class="cap-badge"></span></button>
+      <span id="menu-bal" class="menu-bal"></span>
+    </div>
+    <p class="hint">мышь — руль · F — полный экран · C — салон · 0 — погода · пробел — пауза</p>
   </div>
 `
   : `
@@ -140,13 +149,6 @@ const saveBest = (r: Rec) => localStorage.setItem(BEST_KEY, JSON.stringify(r));
 
 // --- казино-слой: валюта-ноты, pity джекпота, «удачный заезд» --------------
 
-const NOTES_KEY = 'race2107:notes';
-let notesBalance = +(localStorage.getItem(NOTES_KEY) ?? '0') || 0;
-const addNotes = (n: number) => {
-  notesBalance += n;
-  localStorage.setItem(NOTES_KEY, String(notesBalance));
-};
-
 let goldDrought = 0; // заездов подряд без джекпота — на 3-м гарантия (pity)
 let runsUntilLucky = 2 + Math.floor(Math.random() * 3); // первый lucky — рано, на крючок
 let luckyRun = false;
@@ -201,6 +203,7 @@ function renderDiffs() {
 
 async function startRide() {
   clearResults();
+  stopMenuSnow();
   menu.style.display = 'none';
   // простой флоу: каждый заезд — свежий случайный трек (жанр тоже случайный),
   // следующий уже готов из pregenNext — без паузы между заездами
@@ -218,8 +221,10 @@ async function startRide() {
   goldDrought = gold ? 0 : goldDrought + 1;
   const mystery = luckyRun ? 3 : 2;
   player = createStemPlayer(song);
+  const theme = pickTheme(); // новизна: палитра+погода каждый заезд
   game = new Game(app, song, buildLevel(song), player, diff, audioOffsetMs / 1000,
-    { gold, mystery, lucky: luckyRun, best: loadBest()?.score ?? 0 });
+    { gold, mystery, lucky: luckyRun, best: loadBest()?.score ?? 0,
+      carColor: meta.skinColor, theme });
   // результаты — после финишного наката (машина докатилась), не по концу музыки
   game.onFinish = showResults;
   game.start();
@@ -256,37 +261,83 @@ function showResults() {
   game.releasePointer(); // курсор обратно — кликнуть кнопку оверлея
   if (isBest && best) game.celebrate(); // золотой салют у машины
 
-  // ноты: блоки + бонусы, lucky ×1.5, колесо решено заранее (анимация — декор),
-  // начисляем сразу — ранний переход «дальше» ничего не теряет
+  // ноты: блоки + бонусы, lucky ×1.5, колесо решено заранее (анимация — декор)
   const baseNotes = Math.round((collected + bonusNotes) * (luckyRun ? 1.5 : 1));
   const wheelMult = rollWheel();
   const earned = Math.round(baseNotes * wheelMult);
-  addNotes(earned);
+
+  // мета: начислить ноты+XP, проверить миссии, выдать капсулы за уровни
+  const rs: RunStats = {
+    blocks: collected, maxCombo, magnets: game.magnetsGot, mystery: game.mysteryGot,
+    gold: game.goldGot, noCrashSec: Math.round(game.noCrashSec), score,
+  };
+  const reward = applyRun(rs, baseNotes, wheelMult);
 
   // дельта до рекорда: близость, не провал — главный крючок «ещё раз»
   const delta = !best ? ''
     : isBest ? `<div class="res-delta res-delta-up">рекорд побит на ${score - best.score}!</div>`
     : `<div class="res-delta">до рекорда не хватило ${best.score - score}</div>`;
 
-  let left = 8;
+  // три крючка: XP-полоса, миссии (одна 2/3 держит в памяти), до анлока скина
+  const xpl = meta.xpInLevel();
+  const xpPct = Math.min(100, (xpl.have / xpl.need) * 100);
+  const levelUpHtml = reward.levelUp.levels > 0
+    ? `<div class="res-levelup">🎁 УРОВЕНЬ ${meta.level}! +${reward.levelUp.capsules} капсул</div>`
+    : '';
+  const missionsHtml = meta.missions.map((m) => {
+    const just = reward.missions.find((r) => r.mission.text === m.text && r.justDone);
+    return `<div class="res-mission${just ? ' just-done' : ''}">
+      ${m.done || just ? '✅' : '◻️'} ${m.text}
+      <span class="m-prog">${Math.min(m.progress, m.goal)}/${m.goal}</span></div>`;
+  }).join('');
+  const setHtml = reward.setCompleted
+    ? `<div class="res-set">🏅 СЕТ МИССИЙ! постоянный множитель ×${(1 + meta.setBonus).toFixed(1)}</div>`
+    : '';
+  const unl = reward.nextUnlock;
+  const unlockHtml = unl
+    ? `<div class="res-unlock">до «${unl.name}»: ${Math.min(unl.have, unl.price)}/${unl.price} ♪
+        <div class="unlock-bar"><div style="width:${Math.min(100, unl.have / unl.price * 100)}%"></div></div></div>`
+    : '';
+
+  let left = 11;
   results = document.createElement('div');
   results.className = 'results-overlay';
   results.innerHTML = `
     <div class="res-title ${isBest ? 'rec-glow' : ''}">${isBest ? 'РЕКОРД!' : 'ФИНИШ'}</div>
     <div class="res-score">${score}</div>
     ${delta}
-    <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal} · ${song.genre}
+    <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal}
+      ${game.perfects > 0 ? ` · ✨${game.perfects} PERFECT` : ''} · ${song.genre}
       ${luckyRun ? ' · 🔥 ×1.5' : ''}</div>
     <div class="res-slot">
       <span class="slot-label">♪ ${baseNotes}</span>
       <span class="slot-window"><span class="slot-reel" id="reel"></span></span>
       <span class="slot-total" id="wtotal"></span>
     </div>
-    <div class="res-next">следующий трек через <span id="cnt">${left}</span></div>
-    <div><button id="res-replay" class="small">ЕЩЁ РАЗ (R)</button></div>
+    <div class="res-xp">УР.${meta.level}
+      <span class="xp-bar"><span class="xp-fill" id="xpfill" style="width:0%"></span></span>
+      ${xpl.have}/${xpl.need}</div>
+    ${levelUpHtml}
+    <div class="res-missions">${missionsHtml}</div>
+    ${setHtml}
+    ${unlockHtml}
+    <div class="res-next">${meta.sessionRuns}-й заезд · следующий через <span id="cnt">${left}</span></div>
+    <div><button id="res-replay" class="small">ЕЩЁ РАЗ (R)</button>
+      ${meta.capsules > 0 ? `<button id="res-garage" class="small">🎁 КАПСУЛ: ${meta.capsules}</button>` : ''}</div>
     <div class="res-hint">клик или пробел — сразу дальше · Esc — меню</div>
   `;
   app.appendChild(results);
+  // XP-полоса заполняется анимацией (goal-gradient — близость цели видна)
+  requestAnimationFrame(() => {
+    const xf = results?.querySelector<HTMLElement>('#xpfill');
+    if (xf) xf.style.width = `${xpPct}%`;
+  });
+  results.querySelector('#res-garage')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clearResults();
+    teardownRide();
+    openGarage();
+  });
 
   // слот-машина: барабан прокручивается в окошке, замедляется,
   // садится на выпавший множитель; исход решён заранее — анимация декор
@@ -314,7 +365,7 @@ function showResults() {
       wheelTimer = window.setTimeout(() => {
         if (!results) return;
         slotBox.classList.add(wheelMult >= 2 ? 'slot-win' : 'slot-done');
-        wtotal.textContent = `= ${earned} · всего ♪ ${notesBalance}`;
+        wtotal.textContent = `= ${earned} · всего ♪ ${meta.notes}`;
         if (wheelMult >= 2) game?.sfx.jackpot();
       }, 150);
     }
@@ -360,12 +411,129 @@ function replay() {
 function backToMenu() {
   teardownRide();
   clearResults();
+  closeGarage();
   renderTracks();
+  refreshMenuMeta();
   menu.style.display = '';
+  startMenuSnow();
+}
+
+// --- шапка меню: баланс, уровень, бейдж капсул ----------------------------
+
+function refreshMenuMeta() {
+  // первые 2 заезда — чистый главный экран; гараж/ноты/уровень с 3-го раунда
+  const metaRow = menu.querySelector<HTMLDivElement>('.menu-meta');
+  if (metaRow) metaRow.style.display = meta.totalRuns >= 2 ? '' : 'none';
+  const bal = menu.querySelector<HTMLSpanElement>('#menu-bal');
+  if (bal) bal.textContent = `♪ ${meta.notes} · УР.${meta.level}`;
+  const badge = menu.querySelector<HTMLSpanElement>('#cap-badge');
+  if (badge) badge.textContent = meta.capsules > 0 ? String(meta.capsules) : '';
+  if (badge) badge.style.display = meta.capsules > 0 ? '' : 'none';
+}
+
+// --- гараж: скины за ноты + вскрытие капсул --------------------------------
+
+let garage: HTMLDivElement | null = null;
+
+function openGarage() {
+  stopMenuSnow();
+  garage?.remove();
+  garage = document.createElement('div');
+  garage.className = 'menu garage-screen';
+  renderGarage();
+  app.appendChild(garage);
+}
+
+function closeGarage() {
+  garage?.remove();
+  garage = null;
+}
+
+function renderGarage() {
+  if (!garage) return;
+  const skinCards = SKINS.map((s) => {
+    const owned = meta.owned.includes(s.id);
+    const equipped = meta.skin === s.id;
+    const canBuy = !owned && meta.notes >= s.price;
+    const rc = RARITY[s.rarity].css;
+    return `<div class="skin-card${equipped ? ' equipped' : ''}${owned ? ' owned' : ''}"
+        data-id="${s.id}" style="--rar:${rc}">
+      <div class="skin-swatch" style="background:#${s.color.toString(16).padStart(6, '0')}"></div>
+      <div class="skin-rarity" style="color:${rc}">${RARITY[s.rarity].label}</div>
+      <div class="skin-name">${s.name}</div>
+      <div class="skin-act">${
+        equipped ? '✓ НА МАШИНЕ'
+        : owned ? 'НАДЕТЬ'
+        : canBuy ? `КУПИТЬ ♪${s.price}`
+        : `♪${s.price}`
+      }</div>
+    </div>`;
+  }).join('');
+  garage.innerHTML = `
+    <div class="panel garage-panel">
+      <h1>ГАРАЖ</h1>
+      <p class="sub">♪ ${meta.notes} · уровень ${meta.level} · заездов ${meta.totalRuns}
+        · блоков ${meta.totalBlocks} · лучшее комбо x${meta.bestCombo}</p>
+      ${meta.capsules > 0
+        ? `<button id="open-cap" class="play-btn cap-btn">🎁 ВСКРЫТЬ КАПСУЛУ (${meta.capsules})</button>`
+        : ''}
+      <div class="skins-grid">${skinCards}</div>
+      <button id="garage-back" class="small">НАЗАД</button>
+    </div>`;
+  garage.querySelectorAll<HTMLElement>('.skin-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const id = card.dataset.id!;
+      if (meta.owned.includes(id)) equipSkin(id);
+      else buySkin(id);
+      renderGarage();
+    });
+  });
+  garage.querySelector('#open-cap')?.addEventListener('click', runCapsule);
+  garage.querySelector('#garage-back')!.addEventListener('click', () => {
+    closeGarage();
+    refreshMenuMeta();
+    menu.style.display = '';
+    startMenuSnow();
+  });
+}
+
+/** Гача-церемония: тряска → вспышка цветом редкости → новый скин / дубль+ноты. */
+function runCapsule() {
+  const res = openCapsule();
+  if (!res) return;
+  const rar = RARITY[res.skin.rarity];
+  const hex = `#${res.skin.color.toString(16).padStart(6, '0')}`;
+  const fx = document.createElement('div');
+  fx.className = 'capsule-fx';
+  fx.style.setProperty('--rar', rar.css);
+  fx.innerHTML = `<div class="capsule-box">🎁</div>`;
+  app.appendChild(fx);
+  if (game) game.sfx.tick(); // лёгкий щелчок старта
+  setTimeout(() => fx.querySelector('.capsule-box')!.classList.add('burst'), 700);
+  setTimeout(() => {
+    // легенда/эпик звенят джекпот-арпеджио — крупная награда слышна
+    if (game && (res.skin.rarity === 'legendary' || res.skin.rarity === 'epic')) game.sfx.jackpot();
+    const inner = res.isNew
+      ? `<div class="cap-rarity" style="color:${rar.css}">${rar.label}</div>
+         <div class="cap-skin-name" style="color:${hex}">${res.skin.name}</div>
+         <div class="cap-tag">НОВЫЙ СКИН!</div>`
+      : `<div class="cap-rarity" style="color:${rar.css}">${rar.label}</div>
+         <div class="cap-skin-name" style="color:${hex}">${res.skin.name}</div>
+         <div class="cap-tag cap-dupe">ДУБЛЬ → ♪ +${res.notes}</div>`;
+    fx.innerHTML = `<div class="capsule-result" style="border-color:${rar.css}">
+      <div class="cap-swatch" style="background:${hex}"></div>${inner}</div>`;
+    fx.addEventListener('click', () => { fx.remove(); renderGarage(); });
+    setTimeout(() => { fx.remove(); renderGarage(); }, 2400);
+  }, 1000);
 }
 
 menu.querySelector('#regen')?.addEventListener('click', genTracks);
 menu.querySelector('#start')!.addEventListener('click', () => void startRide());
+menu.querySelector('#garage')?.addEventListener('click', () => {
+  menu.style.display = 'none';
+  openGarage();
+});
+refreshMenuMeta();
 addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     // в заезде Esc открывает паузу; из паузы/результатов — в главное меню
@@ -440,6 +608,99 @@ if (!SIMPLE_MENU) {
   genTracks();
   renderDiffs();
 }
+
+// --- снег в меню: лёгкий канвас, крутится только пока меню видно ----------
+
+const snowCanvas = document.createElement('canvas');
+snowCanvas.className = 'menu-snow';
+menu.insertBefore(snowCanvas, menu.firstChild);
+const sctx = snowCanvas.getContext('2d')!;
+let flakes: { x: number; y: number; r: number; sp: number; ph: number }[] = [];
+let snowRaf = 0;
+
+function initFlakes() {
+  snowCanvas.width = innerWidth;
+  snowCanvas.height = innerHeight;
+  const n = Math.round((innerWidth * innerHeight) / 22000); // плотность по площади
+  flakes = Array.from({ length: n }, () => ({
+    x: Math.random() * innerWidth,
+    y: Math.random() * innerHeight,
+    r: 0.8 + Math.random() * 2.2,
+    sp: 0.25 + Math.random() * 0.9,
+    ph: Math.random() * Math.PI * 2,
+  }));
+}
+
+function snowFrame() {
+  snowRaf = requestAnimationFrame(snowFrame);
+  const w = snowCanvas.width, h = snowCanvas.height;
+  sctx.clearRect(0, 0, w, h);
+  sctx.fillStyle = 'rgba(216, 222, 232, 0.8)';
+  for (const f of flakes) {
+    f.y += f.sp;
+    f.x += Math.sin(f.ph + f.y * 0.012) * 0.35;
+    if (f.y > h + 4) { f.y = -4; f.x = Math.random() * w; }
+    sctx.beginPath();
+    sctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+    sctx.fill();
+  }
+}
+
+function startMenuSnow() {
+  if (snowRaf) return;
+  initFlakes();
+  snowFrame();
+}
+function stopMenuSnow() {
+  cancelAnimationFrame(snowRaf);
+  snowRaf = 0;
+  sctx.clearRect(0, 0, snowCanvas.width, snowCanvas.height);
+}
+addEventListener('resize', () => { if (snowRaf) initFlakes(); });
+startMenuSnow();
+
+// --- полноэкранный режим: PLAY включает, F переключает -------------------
+
+const isFs = () => !!document.fullscreenElement;
+async function enterFs() {
+  if (isFs()) return;
+  try { await document.documentElement.requestFullscreen(); } catch { /* заблокировано — мимо */ }
+}
+async function toggleFs() {
+  try {
+    if (isFs()) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  } catch { /* мимо */ }
+}
+
+/** Короткий тост внизу — подсказка про полный экран. */
+let fsToastTimer = 0;
+function fsToast(text: string) {
+  let el = document.querySelector<HTMLDivElement>('.fs-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'fs-toast';
+    app.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(fsToastTimer);
+  fsToastTimer = window.setTimeout(() => el!.classList.remove('show'), 3500);
+}
+
+document.addEventListener('fullscreenchange', () => {
+  fsToast(isFs() ? 'полный экран · F или Esc — выйти' : 'оконный режим · F — снова на весь экран');
+});
+
+// F — переключить полный экран в любой момент
+addEventListener('keydown', (e) => {
+  if (e.code === 'KeyF') { e.preventDefault(); void toggleFs(); }
+});
+
+// PLAY включает полный экран (жест пользователя есть) — на десктопе
+menu.querySelector('#start')!.addEventListener('click', () => {
+  if (!IS_MOBILE) void enterFs();
+});
 
 // --- мобильный гейт: полноэкран + ландшафт перед меню --------------------
 if (matchMedia('(pointer: coarse)').matches && 'ontouchstart' in window) {

@@ -13,10 +13,12 @@ import type { Difficulty } from './blocks';
 
 const LANE_X = 2.7;
 
+// генерим гуще запаса — рантайм-интенсивность активирует часть (см. setIntensity);
+// низкая интенсивность = редкий трафик, высокая = весь поток (веселее на харде)
 const DIFF_INTERVAL: Record<Difficulty, [number, number]> = {
-  light: [3.5, 5.5],
-  norm: [2.2, 3.8],
-  hard: [1.5, 2.8],
+  light: [2.6, 4.2],
+  norm: [1.6, 2.8],
+  hard: [1.0, 1.9],
 };
 
 const VAZ_COLORS = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
@@ -30,6 +32,10 @@ interface Obstacle {
   tMeet: number;
   v: number; // м/с вдоль трассы (встречные — отрицательная)
   hit: boolean;
+  /** Порог интенсивности: преграда активна только если intensity ≥ этого. */
+  threshold: number;
+  /** Near-miss уже засчитан — пролёт впритирку даёт бонус один раз. */
+  grazed?: boolean;
 }
 
 export class Traffic {
@@ -37,6 +43,13 @@ export class Traffic {
   private obstacles: Obstacle[] = [];
   private pileGeo = new THREE.IcosahedronGeometry(1, 0);
   private pileMat = new THREE.MeshLambertMaterial({ color: 0x9aa1ab });
+  private intensity = 0.6; // 0 — минимум преград, 1 — весь сгенерированный поток
+
+  /**
+   * Двунаправленная интенсивность: высокая активирует больше машин (веселее
+   * на харде), низкая убирает лишние (не справляешься — меньше преград).
+   */
+  setIntensity(x: number) { this.intensity = Math.max(0, Math.min(1, x)); }
 
   constructor(level: Level, blocks: Blocks, diff: Difficulty) {
     const [iMin, iMax] = DIFF_INTERVAL[diff];
@@ -48,16 +61,21 @@ export class Traffic {
       const free = [-1, 0, 1].filter((l) => !used.has(l));
       if (free.length) {
         const lane = free[Math.floor(Math.random() * free.length)];
+        // порог: ~40% преград «ядро» (видны всегда), остальные — за интенсивностью
+        const threshold = Math.random() < 0.4 ? 0 : 0.4 + Math.random() * 0.6;
         const r = Math.random();
-        if (r < 0.45) this.spawnCar('oncoming', level, lane, meetDist, t);
-        else if (r < 0.8) this.spawnCar('slow', level, lane, meetDist, t);
-        else this.spawnPile(lane, meetDist, t);
+        if (r < 0.45) this.spawnCar('oncoming', level, lane, meetDist, t, threshold);
+        else if (r < 0.8) this.spawnCar('slow', level, lane, meetDist, t, threshold);
+        else this.spawnPile(lane, meetDist, t, threshold);
       }
       t += iMin + Math.random() * (iMax - iMin);
     }
   }
 
-  private spawnCar(kind: 'oncoming' | 'slow', level: Level, lane: number, meetDist: number, tMeet: number) {
+  private spawnCar(
+    kind: 'oncoming' | 'slow', level: Level, lane: number,
+    meetDist: number, tMeet: number, threshold: number,
+  ) {
     const car = buildCar({
       color: VAZ_COLORS[Math.floor(Math.random() * VAZ_COLORS.length)],
       lightsOn: true,
@@ -67,22 +85,29 @@ export class Traffic {
     if (kind === 'oncoming') car.rotation.y = Math.PI;
     car.visible = false;
     this.root.add(car);
-    this.obstacles.push({ kind, group: car, lane, meetDist, tMeet, v, hit: false });
+    this.obstacles.push({ kind, group: car, lane, meetDist, tMeet, v, hit: false, threshold });
   }
 
-  private spawnPile(lane: number, meetDist: number, tMeet: number) {
+  private spawnPile(lane: number, meetDist: number, tMeet: number, threshold: number) {
     const pile = new THREE.Mesh(this.pileGeo, this.pileMat);
     pile.scale.set(1.3 + Math.random() * 0.5, 0.65, 1.1 + Math.random() * 0.4);
     pile.rotation.y = Math.random() * Math.PI;
     pile.visible = false;
     this.root.add(pile);
-    this.obstacles.push({ kind: 'pile', group: pile, lane, meetDist, tMeet, v: 0, hit: false });
+    this.obstacles.push({ kind: 'pile', group: pile, lane, meetDist, tMeet, v: 0, hit: false, threshold });
   }
 
-  /** Возвращает преграду, в которую въехали в этом кадре (или null). */
-  update(t: number, level: Level, carDist: number, carWorldX: number): Obstacle | null {
+  /**
+   * Двигает преграды, ловит столкновения и near-miss (пролёт впритирку).
+   * Возвращает {collided, grazed} — въезд в этом кадре и/или near-miss.
+   */
+  update(t: number, level: Level, carDist: number, carWorldX: number):
+    { collided: Obstacle | null; grazed: Obstacle | null } {
     let collided: Obstacle | null = null;
+    let grazed: Obstacle | null = null;
     for (const o of this.obstacles) {
+      // прореженные интенсивностью — невидимы и без столкновения
+      if (o.threshold > this.intensity) { o.group.visible = false; continue; }
       const pos = o.meetDist + o.v * (t - o.tMeet);
       const visible = pos > carDist - 35 && pos < carDist + 220;
       o.group.visible = visible;
@@ -94,12 +119,18 @@ export class Traffic {
         const dir = (level.curveAt(pos + 2) - level.curveAt(pos - 2)) / 4;
         o.group.rotation.y = -Math.atan(dir) + (o.kind === 'oncoming' ? Math.PI : 0);
       }
-      if (!o.hit && Math.abs(pos - carDist) < 2.2 && Math.abs(x - carWorldX) < 1.4) {
+      const dz = Math.abs(pos - carDist);
+      const dx = Math.abs(x - carWorldX);
+      if (!o.hit && dz < 2.2 && dx < 1.4) {
         o.hit = true;
         collided = o;
+      } else if (!o.hit && !o.grazed && dz < 2.0 && dx >= 1.4 && dx < 2.5) {
+        // пролетел рядом, но не задел — риск вознаграждается
+        o.grazed = true;
+        grazed = o;
       }
     }
-    return collided;
+    return { collided, grazed };
   }
 
   dispose() {
