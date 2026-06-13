@@ -126,11 +126,13 @@ export class Sfx {
       const m = clamp(28, 52);
       this.bass.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.13, this.soon(), bright);
     }
-    // ДОПАМИН-ИСКРА: восходящая в-ключе нотка по комбо (+октава на перфект) —
-    // звенит сверху на КАЖДЫЙ сбор. Тон даёт «я играю», искра — рост-награду.
-    const PENTA = [0, 2, 4, 7, 9];
-    const spark = 79 + PENTA[combo % 5] + (perfect ? 12 : 0) + (fever ? 5 : 0);
-    this.tone(Math.min(spark, 103), perfect ? 0.5 : 0.3);
+    // ИСКРА-награда = тот же КЛАСС высоты, что у собранной ноты, поднятый в
+    // звонкую октаву (PERFECT — ещё октавой выше). Всегда в тональности трека →
+    // ДОПОЛНЯЕТ песню, а не живёт своей жизнью. Рост-награда — через яркость.
+    let s = Math.round(pitch);
+    while (s < 72) s += 12; // в звонкий регистр, сохраняя класс высоты (в ключе)
+    const spark = Math.min(s + (perfect ? 12 : 0), 103);
+    this.tone(spark, perfect ? 0.5 : Math.min(0.4, 0.24 + bright * 0.16));
   }
 
   // СДВГ-режим: промах нейтрален — никакого негативного звука

@@ -84,6 +84,17 @@ export class Game {
   private lastCrashT = 0;
   noCrashSec = 0; // максимальный отрезок без аварии
   perfects = 0; // сколько собрано в центре полосы — для grade-фидбека
+  // #25/#26 разогрев сессии: растёт за собранные блоки всю сессию (не рвётся
+  // аварией), даёт растущий множитель и всё более богатую картинку — награда
+  // за «играть часами безвылазно». Сброс только при выходе в меню (новый Game).
+  private sessionHeat = 0;
+  private perfectStreak = 0; // #27 PERFECT подряд → восходящее арпеджио + бонус
+  private goldenUntil = -1; // #18 золотая волна активна до этого времени
+  private nextGolden = -1; // когда стартует следующая золотая волна
+  // #23/#24 микро-цель: короткая задача (10–20с), цель мелкая → полоска почти
+  // полна постоянно. Выполнил → бонус + новая. Близкий ясный таргет (СДВГ).
+  private goalEl!: HTMLDivElement;
+  private goal: { kind: 'combo' | 'perfect' | 'collect' | 'nocrash'; target: number; base: number; label: string } | null = null;
   // DDA-интенсивность: кольцо последних попаданий/промахов + комбо.
   // Двунаправленно: жжёшь — гуще блоки и трафик, мажешь — реже.
   private hitRing: number[] = [];
@@ -272,6 +283,12 @@ export class Game {
     this.turboFx = document.createElement('div');
     this.turboFx.className = 'turbo-fx';
     container.appendChild(this.turboFx);
+    this.goalEl = document.createElement('div');
+    this.goalEl.style.cssText = 'position:absolute;top:3.2rem;left:1.2rem;z-index:5;'
+      + 'pointer-events:none;color:#8fe;font:700 13px/1 system-ui,sans-serif;'
+      + 'text-shadow:0 1px 3px #000;opacity:.85';
+    container.appendChild(this.goalEl);
+    this.pickGoal();
 
     this.world.scene.add(this.car);
 
@@ -458,6 +475,17 @@ export class Game {
       // содержимое неизвестно до подбора — variable-ratio в чистом виде
       this.mysteryGot++;
       const r = Math.random();
+      if (r < 0.02) {
+        // #21 ЛЕГЕНДА (~2%): огромный куш + салют + зажигает золотую волну
+        const pts = Math.round(700 * (1 + this.feverLevel));
+        this.score += pts;
+        this.goldenUntil = Math.max(this.goldenUntil, t + 4);
+        this.pop(`🌈 ЛЕГЕНДА! +${pts}`, 'pop-combo pop-mega');
+        this.celebrate();
+        this.particles.burst(b.x, b.y, wz, C_GOLD_SPARK, 60);
+        this.scoreBump();
+        return;
+      }
       if (r < 0.45) {
         const pts = Math.round((40 + this.combo * 4) * (1 + this.feverLevel));
         this.score += pts;
@@ -486,14 +514,26 @@ export class Game {
     this.maxCombo = Math.max(this.maxCombo, this.combo);
     this.collected++;
     this.trackHit(true);
-    // grading: PERFECT (центр полосы) даёт +20% и золотую искру
-    if (perfect) this.perfects++;
-    const grade = perfect ? 1.2 : 1;
+    // разогрев сессии: каждые 70 блоков — тир вверх (растущий множитель/спектакль)
+    const newHeat = Math.floor(this.collected / 70);
+    if (newHeat > this.sessionHeat) { this.sessionHeat = newHeat; this.heatUp(); }
+    // grading + #27 PERFECT-стрик: серия центровых попаданий растит бонус и питч
+    if (perfect) {
+      this.perfects++;
+      this.perfectStreak++;
+      if (this.perfectStreak % 5 === 0) this.pop(`✨ PERFECT ×${this.perfectStreak}`, 'pop-perfect pop-mega');
+    } else {
+      this.perfectStreak = 0;
+    }
+    const grade = perfect ? 1.2 + Math.min(this.perfectStreak, 10) * 0.03 : 1;
     const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
     const od = this.overdrive ? 2 : 1; // овердрайв ×2 поверх всего
+    const heat = 1 + Math.min(this.sessionHeat, 30) * 0.05; // разогрев: до +1.5× за долгую сессию
+    const golden = t < this.goldenUntil; // #18 золотая волна
+    const gw = golden ? 2.5 : 1;
     const pts = Math.round(
       (10 + (b.vel / 127) * 10) * b.count *
-      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl * od,
+      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl * od * heat * gw,
     );
     this.score += pts;
     // банк овердрайва копится сбором (не во время самого овердрайва)
@@ -502,7 +542,8 @@ export class Game {
     this.scoreBump();
     const milestone = this.popFx();
     // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
-    this.particles.burst(b.x, b.y, wz, VOICE_COLORS[b.voice], 12 + b.count * 6);
+    this.particles.burst(b.x, b.y, wz, golden ? C_GOLD_SPARK : VOICE_COLORS[b.voice],
+      12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2);
     if (perfect) {
       this.particles.burst(b.x, b.y + 0.3, wz, C_PERFECT, 8);
       if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
@@ -516,8 +557,36 @@ export class Game {
     this.syncFever();
   }
 
+  /** Выбрать новую микро-цель (мелкий близкий таргет). */
+  private pickGoal() {
+    const r = Math.floor(Math.random() * 4);
+    if (r === 0) this.goal = { kind: 'collect', target: 12, base: this.collected, label: 'собери 12 блоков' };
+    else if (r === 1) {
+      const tgt = Math.max(10, Math.floor(this.combo / 5) * 5 + 10);
+      this.goal = { kind: 'combo', target: tgt, base: 0, label: `комбо ×${tgt}` };
+    } else if (r === 2) this.goal = { kind: 'perfect', target: 4, base: 0, label: '4 PERFECT подряд' };
+    else this.goal = { kind: 'nocrash', target: 12, base: 0, label: '12с без аварии' };
+  }
+
+  /** Микро-цель выполнена: бонус + новая. */
+  private completeGoal() {
+    this.score += 100;
+    this.bonusNotes += 3;
+    this.pop('✅ ЦЕЛЬ! +100', 'pop-combo pop-super');
+    this.flash('#66ff99');
+    this.pickGoal();
+  }
+
+  /** Разогрев сессии вырос на тир: ярлык + золотая вспышка. */
+  private heatUp() {
+    this.pop(`🔥 РАЗОГРЕВ ×${(1 + Math.min(this.sessionHeat, 30) * 0.05).toFixed(2)}`, 'pop-combo pop-mega');
+    this.flash('#ff8a3c');
+    this.shake = Math.max(this.shake, 0.4);
+  }
+
   /** Промах нот-блока: прощающее комбо — одиночный промах тихий. */
   private onMiss() {
+    this.perfectStreak = 0; // серия центровых обрывается промахом
     this.trackHit(false);
     this.missStreak++;
     if (this.missStreak >= this.missLimit && this.combo > 0) {
@@ -725,6 +794,16 @@ export class Game {
     }
     this.nosVis += ((this.nosActive ? 1 : 0) - this.nosVis) * Math.min(1, dt * 8);
 
+    // #18 золотые волны: внезапно ряд блоков «золотой» на ~3с — variable-ratio
+    // сюрприз (×2.5 очки + золотые искры). Старт по случайному таймеру.
+    if (this.nextGolden < 0) this.nextGolden = t + 18 + Math.random() * 22;
+    if (!this.paused && t >= this.nextGolden && t >= this.goldenUntil) {
+      this.goldenUntil = t + 3.2;
+      this.nextGolden = t + 22 + Math.random() * 30;
+      this.pop('🌟 ЗОЛОТАЯ ВОЛНА! ×2.5', 'pop-combo pop-mega');
+      this.flash('#ffd24d');
+    }
+
     // конец трека → фаза наката: своя интеграция вместо distAt
     if (!this.finished && t >= this.level.durationSec - 0.03) {
       this.finished = true;
@@ -895,9 +974,14 @@ export class Game {
     // адаптивная интенсивность: плотность блоков и трафика по игре + финал
     if (!this.finished) this.updateIntensity(t, dt);
     if (grazed && !hitObs) {
+      // #22 near-miss: близкий пролёт активирует дофамин как выигрыш — продаём
+      // «впритык» микро-фризом, вспышкой и тряской
       this.score += 25;
       this.bonusNotes += 2;
-      this.pop('+25 РИСК!', 'pop-combo pop-risk');
+      this.pop('💨 ЧУТЬ-ЧУТЬ! +25', 'pop-combo pop-risk');
+      this.flash('#ffcf66');
+      this.shake = Math.min(0.4, this.shake + 0.15);
+      this.hitStop = Math.max(this.hitStop, 0.03);
       this.scoreBump();
     }
     if (hitObs && t > this.invulnUntil) {
@@ -961,6 +1045,17 @@ export class Game {
       }
       this.comboBarFill.style.width = `${((this.combo - lo) / (hi - lo)) * 100}%`;
 
+      // #23/#24 микро-цель: прогресс к мелкому таргету (полоска почти полна часто)
+      if (this.goal) {
+        let prog = 0;
+        if (this.goal.kind === 'collect') prog = this.collected - this.goal.base;
+        else if (this.goal.kind === 'combo') prog = this.combo;
+        else if (this.goal.kind === 'perfect') prog = this.perfectStreak;
+        else prog = t - this.lastCrashT;
+        if (prog >= this.goal.target) this.completeGoal();
+        else this.goalEl.textContent = `🎯 ${this.goal.label} · ${Math.max(0, Math.floor(prog))}/${this.goal.target}`;
+      }
+
       // #20 комбо-кольцо: заполнение до вехи, цвет/центр по fever+овердрайву
       const od = this.overdrive;
       const mult = (1 + this.feverLevel) * (od ? 2 : 1);
@@ -1007,6 +1102,7 @@ export class Game {
       const hud =
         `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
         `${this.nosActive ? ' · ⚡ТУРБО' : ''}` +
+        `${this.sessionHeat > 0 ? ` · 🔥разогрев ×${(1 + Math.min(this.sessionHeat, 30) * 0.05).toFixed(2)}` : ''}` +
         `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
         `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
         `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
@@ -1023,7 +1119,9 @@ export class Game {
     if (this.bloomPass && !this.paused) {
       const phase = (t * this.bpm / 60) % 1;
       const env = Math.max(0, 1 - phase * 3.2);
-      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35) + this.nosVis * 0.55;
+      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35) + this.nosVis * 0.55
+        + Math.min(this.sessionHeat, 16) * 0.02; // разогрев: мир всё ярче за долгую сессию
+
       if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }
 
@@ -1086,5 +1184,6 @@ export class Game {
     this.odIcon.remove();
     this.odPrompt.remove();
     this.turboFx.remove();
+    this.goalEl.remove();
   }
 }
