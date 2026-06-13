@@ -63,6 +63,25 @@ export const THEMES: WorldTheme[] = [
 
 export const pickTheme = (): WorldTheme => THEMES[Math.floor(Math.random() * THEMES.length)];
 
+/**
+ * Биом-сет: какие здания и как часто какой декор. Ротация биомов (через новизну
+ * #36) меняет облик улицы глубже простого свопа палитры — против однообразия.
+ * kinds — индексы в World.kinds: 0 хрущёвка,1 панелька,2 длинная,3 свечка,
+ * 4 высотка,5 ТЦ,6 промздание.
+ */
+export interface Biome {
+  name: string;
+  kinds: number[];
+  tree: number; fir: number; billboard: number;
+  garage: number; kiosk: number; stop: number; parked: number; bridge: number;
+}
+export const BIOMES: Biome[] = [
+  { name: 'спальный район', kinds: [0, 1, 2, 3], tree: 0.55, fir: 0.55, billboard: 0.25, garage: 0.4, kiosk: 0.3, stop: 0.3, parked: 0.55, bridge: 0.15 },
+  { name: 'центр', kinds: [1, 2, 3, 4, 5], tree: 0.2, fir: 0.3, billboard: 0.7, garage: 0.1, kiosk: 0.45, stop: 0.4, parked: 0.6, bridge: 0.28 },
+  { name: 'промзона', kinds: [6, 2, 0, 6], tree: 0.18, fir: 0.2, billboard: 0.3, garage: 0.65, kiosk: 0.15, stop: 0.15, parked: 0.4, bridge: 0.22 },
+  { name: 'окраина', kinds: [0, 1], tree: 0.85, fir: 0.8, billboard: 0.08, garage: 0.25, kiosk: 0.15, stop: 0.2, parked: 0.3, bridge: 0.1 },
+];
+
 // --- процедурная текстура панельки --------------------------------------
 
 interface BuildingKind {
@@ -113,8 +132,10 @@ function panelTextures(
   return { map, emissiveMap };
 }
 
-function buildingKind(w: number, h: number, d: number, floors: number, cols: number, base: string): BuildingKind {
-  const { map, emissiveMap } = panelTextures(floors, cols, base, 0.28);
+function buildingKind(
+  w: number, h: number, d: number, floors: number, cols: number, base: string, lit = 0.28,
+): BuildingKind {
+  const { map, emissiveMap } = panelTextures(floors, cols, base, lit);
   const side = new THREE.MeshLambertMaterial({
     map, emissiveMap, emissive: 0xffffff, emissiveIntensity: 0.9,
   });
@@ -178,6 +199,15 @@ export class World {
   private poleGeo = new THREE.CylinderGeometry(0.07, 0.1, 5.4, 6);
   private headGeo = new THREE.BoxGeometry(0.5, 0.16, 0.22);
   private coneGeo = new THREE.ConeGeometry(2.6, 4.8, 12, 1, true);
+  // неон-билборды у дороги — кислотный свет, ловится блумом
+  private billboardGeo = new THREE.PlaneGeometry(4.6, 2.5);
+  private billboardMats = [0xff3bd0, 0x22ffee, 0x66ff66, 0xff8a3c, 0xff3b6b].map(
+    (c) => new THREE.MeshBasicMaterial({ color: c, toneMapped: false, side: THREE.DoubleSide }),
+  );
+  // эстакада над дорогой: бетонный настил + опоры
+  private bridgeGeo = new THREE.BoxGeometry(ROAD_W + 8, 1.3, 4.5);
+  private bridgeMat = new THREE.MeshLambertMaterial({ color: 0x2a2c31 });
+  private pillarGeo = new THREE.CylinderGeometry(0.5, 0.6, 8, 8);
   // зимний двор: ели, голые деревья, гаражи, киоски, остановки
   private firGeo = new THREE.ConeGeometry(1.5, 3.6, 7);
   private firMat = new THREE.MeshLambertMaterial({ color: 0x1d2b22 });
@@ -216,6 +246,7 @@ export class World {
   private hemi: THREE.HemisphereLight;
   // #16 материалы, пульсирующие по биту (эмиссив окон/фонарей, ореолы)
   private pulseTargets!: { mat: THREE.Material; prop: string; base: number; amp: number }[];
+  private biomeIdx = 0; // текущий биом-сет (см. BIOMES); ротация через новизну
 
   constructor(
     private hAt: HeightFn = () => 0,
@@ -227,6 +258,7 @@ export class World {
       this.boxGeo, this.poleGeo, this.headGeo, this.coneGeo,
       this.firGeo, this.firSnowGeo, this.trunkGeo, this.crownGeo,
       this.garageGeo, this.garageDoorGeo, this.kioskGeo, this.kioskWinGeo,
+      this.billboardGeo, this.bridgeGeo, this.pillarGeo,
     ]);
 
     const base = IS_MOBILE ? 700 : 1600;
@@ -248,6 +280,9 @@ export class World {
       buildingKind(15, 27, 12, 9, 5, '#474c54'), // панелька 9 эт.
       buildingKind(28, 27, 12, 9, 10, '#52504c'), // длинная 9 эт.
       buildingKind(13, 36, 13, 12, 4, '#41464f'), // свечка 12 эт.
+      buildingKind(16, 54, 16, 18, 5, '#3c4048', 0.34), // высотка 18 эт.
+      buildingKind(34, 12, 22, 3, 14, '#54514a', 0.5), // ТЦ — широкий, ярко горит
+      buildingKind(24, 18, 20, 4, 6, '#3a3833', 0.12), // промздание — тёмное, редкие окна
     ];
 
     for (let i = 0; i < POOLED_LIGHTS; i++) {
@@ -357,6 +392,7 @@ export class World {
     const chunkZ = -index * CHUNK_LEN;
     const zMid = -CHUNK_LEN / 2; // локальный центр чанка
     const lampHeads: THREE.Vector3[] = [];
+    const bm = BIOMES[this.biomeIdx]; // биом-сет: какие здания/декор и как часто
 
     const strip = (w: number, mat: THREE.Material, x: number, yOff: number, segs = 16) => {
       const m = new THREE.Mesh(this.stripGeo(w, CHUNK_LEN, segs, chunkZ + zMid, yOff), mat);
@@ -417,7 +453,7 @@ export class World {
     for (const s of [-1, 1]) {
       let z = -Math.random() * 14;
       while (z > -CHUNK_LEN) {
-        const kind = this.kinds[Math.floor(Math.random() * this.kinds.length)];
+        const kind = this.kinds[bm.kinds[Math.floor(Math.random() * bm.kinds.length)]];
         const rot = Math.random() < 0.4 ? Math.PI / 2 : 0;
         const w = rot ? kind.d : kind.w, d = rot ? kind.w : kind.d;
         const b = new THREE.Mesh(this.boxGeo, kind.mats);
@@ -434,13 +470,15 @@ export class World {
       }
     }
 
-    // деревья вдоль тротуаров и во дворах: ели со снегом + голые
+    // деревья вдоль тротуаров и во дворах: ели со снегом + голые (густота по биому)
     for (const s of [-1, 1]) {
       let z = -Math.random() * 8;
       while (z > -CHUNK_LEN) {
+        z -= 9 + Math.random() * 16;
+        if (Math.random() >= bm.tree) continue; // густота деревьев — по биому
         const x = s * (ROAD_W / 2 + 6 + Math.random() * 16) + this.cAt(chunkZ + z);
         const h = this.hAt(chunkZ + z);
-        if (Math.random() < 0.55) {
+        if (Math.random() < bm.fir) {
           const fir = new THREE.Mesh(this.firGeo, this.firMat);
           fir.position.set(x, h + 1.8, z);
           const cap = new THREE.Mesh(this.firSnowGeo, this.firSnowMat);
@@ -454,12 +492,26 @@ export class World {
           crown.position.set(x, h + 2.7, z);
           group.add(trunk, crown);
         }
-        z -= 9 + Math.random() * 16;
+      }
+    }
+
+    // эстакада над дорогой — проезжаешь под мостом (бетон + опоры)
+    if (Math.random() < bm.bridge) {
+      const z = -8 - Math.random() * (CHUNK_LEN - 16);
+      const cx = this.cAt(chunkZ + z);
+      const h = this.hAt(chunkZ + z);
+      const deck = new THREE.Mesh(this.bridgeGeo, this.bridgeMat);
+      deck.position.set(cx, h + 7.5, z);
+      group.add(deck);
+      for (const s of [-1, 1]) {
+        const pil = new THREE.Mesh(this.pillarGeo, this.bridgeMat);
+        pil.position.set(cx + s * (ROAD_W / 2 + 2.5), h + 3.5, z);
+        group.add(pil);
       }
     }
 
     // ряд гаражей во дворе
-    if (Math.random() < 0.35) {
+    if (Math.random() < bm.garage) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const z0 = -8 - Math.random() * 30;
       const n = 3 + Math.floor(Math.random() * 4);
@@ -478,8 +530,24 @@ export class World {
       }
     }
 
+    // неон-билборд на столбе у дороги, лицом к трассе — кислотный акцент
+    if (Math.random() < bm.billboard) {
+      const s = Math.random() < 0.5 ? -1 : 1;
+      const z = -Math.random() * CHUNK_LEN;
+      const x = s * (ROAD_W / 2 + 5) + this.cAt(chunkZ + z);
+      const h = this.hAt(chunkZ + z);
+      const post = new THREE.Mesh(this.poleGeo, this.poleMat);
+      post.position.set(x, h + 2.7, z);
+      const board = new THREE.Mesh(
+        this.billboardGeo, this.billboardMats[Math.floor(Math.random() * this.billboardMats.length)],
+      );
+      board.position.set(x, h + 5.5, z);
+      board.rotation.y = s * 0.5; // лицом к подъезжающему водителю, чуть к центру дороги
+      group.add(post, board);
+    }
+
     // киоск с тёплой витриной
-    if (Math.random() < 0.3) {
+    if (Math.random() < bm.kiosk) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const z = -Math.random() * CHUNK_LEN;
       const x = s * (ROAD_W / 2 + 7.5) + this.cAt(chunkZ + z);
@@ -493,7 +561,7 @@ export class World {
     }
 
     // остановка: задняя стенка, крыша, лавка, холодная лампа
-    if (Math.random() < 0.3) {
+    if (Math.random() < bm.stop) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const z = -10 - Math.random() * (CHUNK_LEN - 20);
       const bx = s * (ROAD_W / 2 + 4.6) + this.cAt(chunkZ + z);
@@ -513,7 +581,7 @@ export class World {
     }
 
     // припаркованные жигули у обочины, фары потушены
-    if (Math.random() < 0.55) {
+    if (Math.random() < bm.parked) {
       const n = 1 + (Math.random() < 0.3 ? 1 : 0);
       for (let p = 0; p < n; p++) {
         const s = Math.random() < 0.5 ? -1 : 1;
@@ -535,6 +603,15 @@ export class World {
     group.position.z = chunkZ;
     this.scene.add(group);
     return { group, index, lampHeads };
+  }
+
+  /**
+   * Сменить биом-сет. БЕЗ пересборки (она = 13 чанков разом = спайк/хрип):
+   * чанки впереди примут новый биом по мере рециклинга — въезжаешь в новый
+   * район плавно за ~780 м (естественный переход, ноль спайка).
+   */
+  setBiome(i: number) {
+    this.biomeIdx = ((i % BIOMES.length) + BIOMES.length) % BIOMES.length;
   }
 
   /**

@@ -879,6 +879,7 @@ export class Game {
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
       const th = THEMES[this.themeIndex];
       this.world.applyTheme(th);
+      this.world.setBiome(this.themeIndex); // район меняется — примут чанки впереди по мере въезда
       this.pop(`🎨 ${th.name}`, 'pop-theme');
       if (comfortable) this.goldenUntil = Math.max(this.goldenUntil, t + 3); // вызов+награда заскучавшему
     }
