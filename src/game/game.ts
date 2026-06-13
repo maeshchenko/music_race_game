@@ -10,13 +10,15 @@ import { comboPhrase } from './phrases';
 import { buildCar } from './car';
 import {
   Blocks, VOICE_COLORS, VOICE_CSS, POWER_COLOR, POWER_CSS,
-  type Difficulty, type BlockExtras,
+  type Difficulty, type BlockExtras, type BlockDef,
 } from './blocks';
 import { makeGate } from './gate';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
 import { Sfx } from './sfx';
 import type { Level } from './level';
+import { EndlessChain } from './chain';
+import type { Conductor } from '../conductor';
 import type { Song } from 'midi-gen/core';
 
 const STEER_RANGE = 3.2;
@@ -38,8 +40,11 @@ export class Game {
   private camera: THREE.PerspectiveCamera;
   private world: World;
   private car: THREE.Group;
-  private blocks: Blocks;
-  private traffic: Traffic;
+  private blocks!: Blocks; // одиночный трек; в endless блоки живут в chain
+  private traffic!: Traffic;
+  private chain: EndlessChain | null = null;
+  private endless = false;
+  private posSource!: { positionSec(): number; isPlaying(): boolean };
   private invulnUntil = -1; // после удара — 1.5 с неуязвимости
   private particles = new Particles();
   private shake = 0;
@@ -98,7 +103,11 @@ export class Game {
   private coastDist = 0;
   private finishNotified = false;
   onFinish?: () => void;
-  get blocksTotal() { return this.blocks.total; }
+  /** endless: вызывается на финише трека (для тикера/наград). */
+  onSegment?: () => void;
+  private lastSeamT = 0; // транспортное время последнего отпразднованного стыка
+  private finaleCamT = -1; // старт камео-флориша на финише трека
+  get blocksTotal() { return this.endless ? 0 : this.blocks.total; }
   private mouseX = 0; // -1..1
   private carX = 0;
   private firstPerson = false;
@@ -116,19 +125,22 @@ export class Game {
     container: HTMLElement,
     song: Song,
     private level: Level,
-    private player: Player,
+    private player: Player | null,
     diff: Difficulty = 'norm',
     private audioOffset = 0, // сек; калибровка из меню
     extras: BlockExtras & {
       lucky?: boolean; best?: number; carColor?: number; theme?: WorldTheme;
     } = { gold: false, mystery: 0 },
+    endlessOpts?: { conductor: Conductor; nextSong: () => Promise<Song> },
   ) {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.bpm = song.bpm;
     this.bestScore = extras.best ?? 0;
+    this.endless = !!endlessOpts;
     this.car = buildCar({ color: extras.carColor ?? 0x6b1220 });
+    // замыкания мира читают this.level — в endless ниже он становится цепочкой
     this.world = new World(
-      (z) => level.heightAt(-z), (z) => level.curveAt(-z), extras.theme,
+      (z) => this.level.heightAt(-z), (z) => this.level.curveAt(-z), extras.theme,
     );
     if (extras.theme) this.themeIndex = Math.max(0, THEMES.indexOf(extras.theme));
     // кеш материала задней фары (обе фары делят один материал) и glow-ореолов
@@ -137,7 +149,35 @@ export class Game {
     this.car.traverse((o) => {
       if (o.name === 'tailglow' && o instanceof THREE.Sprite) this.tailGlows.push(o);
     });
-    this.blocks = new Blocks(song, level, diff, extras);
+    this.world.scene.add(this.particles.points);
+
+    if (endlessOpts) {
+      // бесконечный сет: цепочка сегментов владеет блоками/трафиком и аудио;
+      // scene уже создана миром → можно подвесить первый сегмент сразу
+      this.posSource = endlessOpts.conductor;
+      this.chain = new EndlessChain(
+        this.world.scene, endlessOpts.conductor, diff, endlessOpts.nextSong,
+      );
+      this.chain.pushFirst(song);
+      this.level = this.chain; // дальше вся геометрия/тайминги — из цепочки
+      this.world.rebuild(); // чанки были построены со заглушкой — пересобрать под цепочку
+    } else {
+      this.posSource = this.player!;
+      this.blocks = new Blocks(song, this.level, diff, extras);
+      this.traffic = new Traffic(this.level, this.blocks, diff);
+      this.world.scene.add(this.blocks.mesh, this.traffic.root);
+      // ворота старта и финиша поперёк дороги
+      for (const [label, color, css, d] of [
+        ['СТАРТ', 0x22ffee, '#22ffee', this.level.distAt(1.2)],
+        ['ФИНИШ', 0xff44ff, '#ff44ff', this.level.distAt(this.level.durationSec - 0.4)],
+      ] as const) {
+        const gate = makeGate(label, color, css);
+        const dir = (this.level.curveAt(d + 2) - this.level.curveAt(d - 2)) / 4;
+        gate.position.set(this.level.curveAt(d), this.level.heightAt(d), -d);
+        gate.rotation.y = -Math.atan(dir);
+        this.world.scene.add(gate);
+      }
+    }
     // название темы — короткий ярлык новизны на старте
     if (extras.theme)
       setTimeout(() => {
@@ -148,20 +188,6 @@ export class Game {
       setTimeout(() => {
         if (!this.disposed) this.pop('🔥 УДАЧНЫЙ ЗАЕЗД! НАГРАДЫ ×1.5', 'pop-combo pop-mega');
       }, 1200);
-    this.traffic = new Traffic(level, this.blocks, diff);
-    this.world.scene.add(this.blocks.mesh, this.particles.points, this.traffic.root);
-
-    // ворота старта и финиша поперёк дороги
-    for (const [label, color, css, d] of [
-      ['СТАРТ', 0x22ffee, '#22ffee', level.distAt(1.2)],
-      ['ФИНИШ', 0xff44ff, '#ff44ff', level.distAt(level.durationSec - 0.4)],
-    ] as const) {
-      const gate = makeGate(label, color, css);
-      const dir = (level.curveAt(d + 2) - level.curveAt(d - 2)) / 4;
-      gate.position.set(level.curveAt(d), level.heightAt(d), -d);
-      gate.rotation.y = -Math.atan(dir);
-      this.world.scene.add(gate);
-    }
     // телефон: без antialias/bloom, pixelRatio ниже — GPU и так впритык.
     // десктоп кап 1.5 (а не 2): на retina 2x = 4x пикселей под bloom — тяжело,
     // и тяжёлый live-синтез конкурирует за CPU → запас спасает от заиканий звука
@@ -334,7 +360,118 @@ export class Game {
       lvl === 0 && this.combo >= 10 ? String(((this.combo - 9) / 6) * 0.5) : '';
     // музыкальные слои: база / +chords·counter (x8) / всё (x16)
     const tier = this.combo >= 16 ? 2 : this.combo >= 8 ? 1 : 0;
-    (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
+    if (this.endless && this.chain) this.chain.setTier(tier);
+    else (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
+  }
+
+  /**
+   * Сбор блока: очки/эффекты. distOffset — глобальный сдвиг сегмента (endless),
+   * чтобы искры/вспышки легли в мировой z. Для одиночного трека distOffset=0.
+   */
+  private onCollect(b: BlockDef, perfect: boolean, t: number, distOffset: number) {
+    const wz = -(b.dist + distOffset); // мировой z блока
+    if (b.kind === 'magnet') {
+      const power = b.power ?? 'magnet';
+      this.magnetsGot++; // засчитываем как пойманный пикап (миссия «магниты»)
+      this.score += 50;
+      if (power === 'shield') {
+        this.shielded = true;
+        this.pop('🛡 ЩИТ!', 'pop-combo pop-super');
+      } else if (power === 'double') {
+        this.doubleUntil = t + 10;
+        this.pop('✖2 ОЧКИ x2!', 'pop-combo pop-super');
+      } else {
+        this.magnetUntil = t + 8;
+        this.pop('🧲 МАГНИТ!', 'pop-combo pop-super');
+      }
+      this.particles.burst(b.x, b.y, wz, POWER_COLOR[power], 30);
+      this.flash(POWER_CSS[power]);
+      this.shake = Math.min(0.5, this.shake + 0.2);
+      this.scoreBump();
+      return;
+    }
+    if (b.kind === 'gold') {
+      // джекпот: куш растёт с комбо — поймать на высоком стрике вкуснее
+      this.goldGot++;
+      const pts = Math.round((100 + this.combo * 6) * (1 + this.feverLevel));
+      this.score += pts;
+      this.bonusNotes += 25;
+      this.pop(`💰 ДЖЕКПОТ +${pts}!`, 'pop-combo pop-mega');
+      this.flash('#ffd24d');
+      this.particles.burst(b.x, b.y, wz, C_GOLD_SPARK, 60);
+      this.shake = Math.min(0.6, this.shake + 0.5);
+      this.hitStop = 0.07;
+      this.sfx.jackpot();
+      this.scoreBump();
+      return;
+    }
+    if (b.kind === 'mystery') {
+      // содержимое неизвестно до подбора — variable-ratio в чистом виде
+      this.mysteryGot++;
+      const r = Math.random();
+      if (r < 0.45) {
+        const pts = Math.round((40 + this.combo * 4) * (1 + this.feverLevel));
+        this.score += pts;
+        this.pop(`❓ +${pts} ОЧКОВ`, 'pop-combo pop-mystery');
+      } else if (r < 0.7) {
+        this.magnetUntil = t + 8;
+        this.pop('❓ 🧲 МАГНИТ!', 'pop-combo pop-mystery');
+      } else if (r < 0.9) {
+        this.bonusNotes += 15;
+        this.pop('❓ ♪ +15 НОТ', 'pop-combo pop-mystery');
+      } else {
+        const pts = Math.round(250 * (1 + this.feverLevel));
+        this.score += pts;
+        this.pop(`❓ 💰 КУШ +${pts}!`, 'pop-combo pop-mega');
+      }
+      this.flash('#ffffff');
+      this.particles.burst(b.x, b.y, wz, C_WHITE, 50);
+      this.shake = Math.min(0.5, this.shake + 0.3);
+      this.sfx.mystery();
+      this.scoreBump();
+      return;
+    }
+    this.missStreak = 0;
+    this.combo++;
+    this.maxCombo = Math.max(this.maxCombo, this.combo);
+    this.collected++;
+    this.trackHit(true);
+    // grading: PERFECT (центр полосы) даёт +20% и золотую искру
+    if (perfect) this.perfects++;
+    const grade = perfect ? 1.2 : 1;
+    const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
+    const pts = Math.round(
+      (10 + (b.vel / 127) * 10) * b.count *
+      (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl,
+    );
+    this.score += pts;
+    this.sfx.collect(this.combo, this.fever, b.count, b.beatType, b.voice, b.pitch, perfect);
+    this.scoreBump();
+    const milestone = this.popFx();
+    // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
+    this.particles.burst(b.x, b.y, wz, VOICE_COLORS[b.voice], 12 + b.count * 6);
+    if (perfect) {
+      this.particles.burst(b.x, b.y + 0.3, wz, C_PERFECT, 8);
+      if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
+    }
+    if (milestone) {
+      this.flash(VOICE_CSS[b.voice]);
+      this.shake = Math.min(0.45, this.shake + 0.3);
+    } else if (b.count > 1) {
+      this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
+    }
+    this.syncFever();
+  }
+
+  /** Промах нот-блока: прощающее комбо — одиночный промах тихий. */
+  private onMiss() {
+    this.trackHit(false);
+    this.missStreak++;
+    if (this.missStreak >= this.missLimit && this.combo > 0) {
+      this.missStreak = 0;
+      this.breakCombo();
+      this.sfx.miss();
+    }
   }
 
   /** Кольцо попал/мимо для hit-rate (вызывается на каждый блок/промах). */
@@ -360,12 +497,19 @@ export class Game {
       const comboBoost = Math.min(this.combo / 25, 1) * 0.25;
       target = Math.max(0.35, Math.min(1, perf * 0.8 + 0.2 + comboBoost));
     }
-    // финальная эскалация: последние 20% трека тянем к максимуму (кульминация)
-    const frac = t / this.level.durationSec;
+    // финальная эскалация: последние 20% трека тянем к максимуму (кульминация).
+    // в endless — прогресс внутри ТЕКУЩЕГО трека (каждый кончается пиком).
+    const frac = this.endless && this.chain ? this.chain.localFrac(t) : t / this.level.durationSec;
     if (frac > 0.8) target = Math.max(target, 0.8 + (frac - 0.8) / 0.2 * 0.2);
     this.intensity += (target - this.intensity) * Math.min(1, dt * 0.8); // плавно ~1.3с
-    this.blocks.setDensity(0.55 + this.intensity * 0.45); // 0.55..1.0
-    this.traffic.setIntensity(this.intensity);
+    const density = 0.55 + this.intensity * 0.45; // 0.55..1.0
+    if (this.endless && this.chain) {
+      this.chain.setDensity(density);
+      this.chain.setIntensity(this.intensity);
+    } else {
+      this.blocks.setDensity(density);
+      this.traffic.setIntensity(this.intensity);
+    }
   }
 
   /** Церемония рекорда на финише: золотой салют вокруг машины. */
@@ -379,6 +523,19 @@ export class Game {
       }, k * 220);
     this.flash('#ffd24d');
     this.sfx.jackpot();
+  }
+
+  /**
+   * Финиш трека в бесконечном сете: салют у машины, ярлык, камео-флориш камеры
+   * (отъезд назад-вверх и возврат) + начисление награды. Машина НЕ тормозит —
+   * следующий трек уже подхватывает, это дофаминовый пик без разрыва потока.
+   */
+  private finale(t: number) {
+    this.celebrate(); // 3 волны золотых искр + вспышка + джекпот-арпеджио
+    this.pop('🏁 ТРЕК ПРОЙДЕН!', 'pop-combo pop-mega');
+    this.finaleCamT = t;
+    this.shake = Math.max(this.shake, 0.5);
+    this.onSegment?.(); // тикер + ноты/XP за пройденный трек
   }
 
   private onMouse = (e: MouseEvent) => {
@@ -424,6 +581,11 @@ export class Game {
    * постобработки. Без него первый игровой кадр компилирует шейдеры «на лету»
    * и заметно лагает — здесь это происходит под лоадером, до начала заезда.
    */
+  /** endless: дождаться готовности аудио первого сегмента (reverb-IR). */
+  async audioReady() {
+    if (this.endless && this.chain) await this.chain.readyFirst();
+  }
+
   warmup() {
     this.renderer.compile(this.world.scene, this.camera);
     if (this.composer) this.composer.render();
@@ -457,9 +619,9 @@ export class Game {
     if (!this.paused) {
       // positionSec возвращает 0, пока аудио-контекст реально не играет —
       // ГАРАНТИЯ: машина не трогается без слышимого звука
-      const reported = this.player.positionSec();
+      const reported = this.posSource.positionSec();
       if (!this.audioStarted) {
-        if (this.player.isPlaying() && reported > 0) {
+        if (this.posSource.isPlaying() && reported > 0) {
           this.audioStarted = true; // первый слышимый звук — поехали в синхрон
         } else {
           this.tEst = 0; // ждём звук на старте
@@ -587,122 +749,56 @@ export class Game {
         this.level.curveAt(dist + 8) + this.carX * 0.8, y + 1.0, -dist - 8,
       );
     }
+    // камео-флориш финиша: камера отъезжает назад-вверх и плавно возвращается
+    if (this.finaleCamT >= 0) {
+      const ft = t - this.finaleCamT;
+      if (ft > 1.8 || ft < 0) this.finaleCamT = -1;
+      else {
+        const env = Math.sin(Math.min(1, ft / 1.8) * Math.PI); // 0→1→0
+        this.camera.position.z += 9 * env; // отъезд назад
+        this.camera.position.y += 4 * env; // и вверх
+      }
+    }
     this.particles.update(dt);
 
     // блоки: сбор по позиции машины (+притяжение при активном магните)
     const magnetActive = t < this.magnetUntil;
-    this.blocks.update(
-      dist, cx + this.carX, t, dt, this.fever, magnetActive,
-      (b, perfect) => {
-        if (b.kind === 'magnet') {
-          const power = b.power ?? 'magnet';
-          this.magnetsGot++; // засчитываем как пойманный пикап (миссия «магниты»)
-          this.score += 50;
-          if (power === 'shield') {
-            this.shielded = true;
-            this.pop('🛡 ЩИТ!', 'pop-combo pop-super');
-          } else if (power === 'double') {
-            this.doubleUntil = t + 10;
-            this.pop('✖2 ОЧКИ x2!', 'pop-combo pop-super');
-          } else {
-            this.magnetUntil = t + 8;
-            this.pop('🧲 МАГНИТ!', 'pop-combo pop-super');
-          }
-          this.particles.burst(b.x, b.y, -b.dist, POWER_COLOR[power], 30);
-          this.flash(POWER_CSS[power]);
-          this.shake = Math.min(0.5, this.shake + 0.2);
-          this.scoreBump();
-          return;
-        }
-        if (b.kind === 'gold') {
-          // джекпот: куш растёт с комбо — поймать на высоком стрике вкуснее
-          this.goldGot++;
-          const pts = Math.round((100 + this.combo * 6) * (1 + this.feverLevel));
-          this.score += pts;
-          this.bonusNotes += 25;
-          this.pop(`💰 ДЖЕКПОТ +${pts}!`, 'pop-combo pop-mega');
-          this.flash('#ffd24d');
-          this.particles.burst(b.x, b.y, -b.dist, C_GOLD_SPARK, 60);
-          this.shake = Math.min(0.6, this.shake + 0.5);
-          this.hitStop = 0.07;
-          this.sfx.jackpot();
-          this.scoreBump();
-          return;
-        }
-        if (b.kind === 'mystery') {
-          // содержимое неизвестно до подбора — variable-ratio в чистом виде
-          this.mysteryGot++;
-          const r = Math.random();
-          if (r < 0.45) {
-            const pts = Math.round((40 + this.combo * 4) * (1 + this.feverLevel));
-            this.score += pts;
-            this.pop(`❓ +${pts} ОЧКОВ`, 'pop-combo pop-mystery');
-          } else if (r < 0.7) {
-            this.magnetUntil = t + 8;
-            this.pop('❓ 🧲 МАГНИТ!', 'pop-combo pop-mystery');
-          } else if (r < 0.9) {
-            this.bonusNotes += 15;
-            this.pop('❓ ♪ +15 НОТ', 'pop-combo pop-mystery');
-          } else {
-            const pts = Math.round(250 * (1 + this.feverLevel));
-            this.score += pts;
-            this.pop(`❓ 💰 КУШ +${pts}!`, 'pop-combo pop-mega');
-          }
-          this.flash('#ffffff');
-          this.particles.burst(b.x, b.y, -b.dist, C_WHITE, 50);
-          this.shake = Math.min(0.5, this.shake + 0.3);
-          this.sfx.mystery();
-          this.scoreBump();
-          return;
-        }
-        this.missStreak = 0;
-        this.combo++;
-        this.maxCombo = Math.max(this.maxCombo, this.combo);
-        this.collected++;
-        this.trackHit(true);
-        // grading: PERFECT (центр полосы) даёт +20% и золотую искру
-        if (perfect) this.perfects++;
-        const grade = perfect ? 1.2 : 1;
-        const dbl = t < this.doubleUntil ? 2 : 1; // пикап ×2
-        const pts = Math.round(
-          (10 + (b.vel / 127) * 10) * b.count *
-          (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel) * grade * dbl,
+    const carWorldX = cx + this.carX;
+    type ObsHit = ReturnType<Traffic['update']>['collided'];
+    let hitObs: ObsHit = null;
+    let grazed: ObsHit = null;
+    if (this.endless && this.chain) {
+      // бесконечный сет: подвесить/снять сегменты и обойти активные. Каждый
+      // сегмент сдвинут по дистанции/времени — кормим его локальными координатами
+      this.chain.update(dist, t);
+      // церемония финиша трека: салют + камео, разово на стыке (поток не рвём)
+      const seam = this.chain.lastSeamBefore(t);
+      if (seam > this.lastSeamT) { this.lastSeamT = seam; this.finale(t); }
+      for (const seg of this.chain.active()) {
+        const ld = dist - seg.distOffset;
+        const lt = t - seg.tOffset;
+        seg.blocks.update(
+          ld, carWorldX, lt, dt, this.fever, magnetActive,
+          (b, perfect) => this.onCollect(b, perfect, t, seg.distOffset),
+          () => this.onMiss(),
         );
-        this.score += pts;
-        this.sfx.collect(this.combo, this.fever, b.count, b.beatType, b.voice, b.pitch, perfect);
-        this.scoreBump();
-        const milestone = this.popFx();
-        // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
-        this.particles.burst(b.x, b.y, -b.dist, VOICE_COLORS[b.voice], 12 + b.count * 6);
-        if (perfect) {
-          this.particles.burst(b.x, b.y + 0.3, -b.dist, C_PERFECT, 8);
-          if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
-        }
-        if (milestone) {
-          this.flash(VOICE_CSS[b.voice]);
-          this.shake = Math.min(0.45, this.shake + 0.3);
-        } else if (b.count > 1) {
-          this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
-        }
-        this.syncFever();
-      },
-      () => {
-        // прощающее комбо: одиночный промах — тишина
-        this.trackHit(false);
-        this.missStreak++;
-        if (this.missStreak >= this.missLimit && this.combo > 0) {
-          this.missStreak = 0;
-          this.breakCombo();
-          this.sfx.miss();
-        }
-      },
-    );
+        const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX);
+        if (r.collided) hitObs = r.collided;
+        if (r.grazed) grazed = r.grazed;
+      }
+    } else {
+      this.blocks.update(
+        dist, carWorldX, t, dt, this.fever, magnetActive,
+        (b, perfect) => this.onCollect(b, perfect, t, 0),
+        () => this.onMiss(),
+      );
+      const r = this.traffic.update(t, this.level, dist, carWorldX);
+      hitObs = r.collided;
+      grazed = r.grazed;
+    }
 
     // адаптивная интенсивность: плотность блоков и трафика по игре + финал
     if (!this.finished) this.updateIntensity(t, dt);
-
-    // трафик: столкновение = откат комбо и штраф; near-miss = бонус за риск
-    const { collided: hitObs, grazed } = this.traffic.update(t, this.level, dist, cx + this.carX);
     if (grazed && !hitObs) {
       this.score += 25;
       this.bonusNotes += 2;
@@ -775,12 +871,14 @@ export class Game {
         `${t < this.doubleUntil ? ` · ✖2 ${Math.ceil(this.doubleUntil - t)}с` : ''}` +
         `${this.shielded ? ' · 🛡' : ''}` +
         recPart +
-        ` · ${kmh} км/ч · ${fmtTime(t)} / ${fmtTime(this.level.durationSec)}`;
+        // endless: без таймера трека — сессия «не считает время» (запрос игрока)
+        (this.endless ? ` · ${kmh} км/ч` : ` · ${kmh} км/ч · ${fmtTime(t)} / ${fmtTime(this.level.durationSec)}`);
       if (hud !== this.lastHud) { this.hud.textContent = hud; this.lastHud = hud; }
     }
 
     // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее.
     // присваиваем только при заметном изменении — лишние записи в пасс не нужны
+    if (this.endless && this.chain) this.bpm = this.chain.bpmAt(t); // пульс под текущий трек
     if (this.bloomPass && !this.paused) {
       const phase = (t * this.bpm / 60) % 1;
       const env = Math.max(0, 1 - phase * 3.2);
@@ -821,8 +919,8 @@ export class Game {
     this.renderer.domElement.removeEventListener('touchstart', this.onTouch);
     this.renderer.domElement.removeEventListener('touchmove', this.onTouch);
     if (this.pointerLocked) document.exitPointerLock();
-    this.blocks.dispose();
-    this.traffic.dispose();
+    if (this.endless && this.chain) this.chain.dispose();
+    else { this.blocks.dispose(); this.traffic.dispose(); }
     this.particles.dispose();
     this.sfx.dispose();
     this.world.dispose();

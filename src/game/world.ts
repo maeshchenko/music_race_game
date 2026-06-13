@@ -514,6 +514,15 @@ export class World {
     return { group, index, lampHeads };
   }
 
+  /**
+   * Пересобрать все чанки на их текущих индексах. Нужно, когда геометрия
+   * (heightAt/curveAt) сменилась после конструктора — напр., в endless мир
+   * строится со заглушкой, а после привязки цепочки дорогу надо перестроить.
+   */
+  rebuild() {
+    for (const c of this.chunks) this.recycle(c, c.index);
+  }
+
   /** Пересобрать наполнение чанка под новый индекс (переезд вперёд). */
   private recycle(chunk: Chunk, newIndex: number) {
     this.scene.remove(chunk.group);

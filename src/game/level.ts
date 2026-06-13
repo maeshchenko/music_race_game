@@ -137,6 +137,10 @@ export function buildLevel(song: Song): Level {
   // (лимит падает раньше, чем машина доезжает, за счёт плавных въездов).
 
   const VMIN = 25; // нижний предел скорости, м/с (~90 км/ч) — не едем медленнее
+// опорная скорость стыка: каждый сегмент в endless начинается/кончается на ней,
+// поэтому на переходе трек→трек скорость непрерывна (нет толчка). Середина трека
+// по-прежнему гуляет по энергии музыки — сварка только у концов.
+const VREF = 30; // ~108 км/ч
   const steps = Math.ceil(durationSec / SIM_DT) + 2;
   const sArr = new Float32Array(steps);
   const vArr = new Float32Array(steps);
@@ -160,6 +164,24 @@ export function buildLevel(song: Song): Level {
       s += v * SIM_DT;
     }
   }
+
+  // сварка скорости у концов: плавно тянем старт и финиш к VREF (окно ~2.5 с),
+  // затем переинтегрируем дистанцию из сваренной скорости — distAt остаётся
+  // согласован с blocks (они садятся на distAt тех же нот). Стык трек→трек
+  // теперь без толчка: обе стороны едут VREF.
+  {
+    const wl = Math.min(steps >> 2, Math.round(2.5 / SIM_DT));
+    for (let k = 0; k < wl; k++) {
+      const u = k / wl;
+      const w = u * u * (3 - 2 * u); // smoothstep 0→1
+      vArr[k] = VREF + (vArr[k] - VREF) * w; // старт: VREF → профиль
+      const i = steps - 1 - k;
+      vArr[i] = VREF + (vArr[i] - VREF) * w; // финиш: профиль → VREF
+    }
+    sArr[0] = 0;
+    for (let k = 1; k < steps; k++)
+      sArr[k] = sArr[k - 1] + (vArr[k - 1] + vArr[k]) * 0.5 * SIM_DT;
+  }
   const totalDist = sArr[steps - 1];
 
   const sampleT = (a: Float32Array, t: number) => {
@@ -167,6 +189,26 @@ export function buildLevel(song: Song): Level {
     const i = Math.min(steps - 2, Math.floor(f));
     return a[i] + (a[i + 1] - a[i]) * (f - i);
   };
+
+  // --- сварка концов: ось и высота → 0 у totalDist (и дальше) -----------
+  // Бесконечный режим клеит сегменты встык. Если каждый уровень начинается и
+  // кончается в (x=0, h=0) с нулевым наклоном, стык — без шва и без излома:
+  // следующий сегмент стартует из тех же 0. Старт уже в 0 (интегралы с нуля);
+  // хвост плавно гасим smoothstep'ом на участке WELD_M перед totalDist, дальше
+  // держим ровно 0 (мир смотрит вперёд за стык до появления нового сегмента).
+  {
+    const WELD_M = 150;
+    const iEnd = clamp(Math.round(totalDist / DS), 1, n - 1);
+    const wp = Math.min(iEnd, Math.round(WELD_M / DS));
+    for (let k = 0; k < wp; k++) {
+      const i = iEnd - wp + k;
+      const u = k / wp; // 0 в начале окна → 1 у стыка
+      const s = 1 - u * u * (3 - 2 * u); // smoothstep: 1 → 0 к стыку
+      xArr[i] *= s;
+      hArr[i] *= s;
+    }
+    for (let i = iEnd; i < n; i++) { xArr[i] = 0; hArr[i] = 0; }
+  }
 
   return {
     durationSec,

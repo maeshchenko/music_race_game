@@ -16,7 +16,9 @@ import {
   newSong, songDurationSec, formatDuration, createStemPlayer, GENRES, type GameGenre,
 } from './music';
 import { Game } from './game/game';
+import { Conductor } from './conductor';
 import { buildLevel } from './game/level';
+import type { Level } from './game/level';
 import { pickTheme } from './game/world';
 import { GarageView } from './garage-view';
 import type { Difficulty } from './game/blocks';
@@ -84,6 +86,33 @@ let results: HTMLDivElement | null = null;
 let replayRequested = false; // «ЕЩЁ РАЗ» — не перегенерировать трек
 let nextSong: Song | null = null; // следующий трек: генерится в фоне во время заезда
 let countdownTimer = 0;
+let conductor: Conductor | null = null; // бесконечный сет: общий транспорт
+// дельты для пер-сегментной награды (ноты/XP начисляются на каждом стыке)
+let segPrevScore = 0;
+let segPrevBlocks = 0;
+
+// бесконечный режим — главный таймкиллер: треки склеиваются без остановки.
+// false вернёт старый поэтапный заезд с экраном результатов.
+const ENDLESS = true;
+
+/** Заглушка-уровень: в endless геометрия идёт из цепочки, этот не сэмплится. */
+const STUB_LEVEL: Level = {
+  durationSec: 0, totalDist: 0,
+  distAt: () => 0, speedAt: () => 25, heightAt: () => 0, curveAt: () => 0,
+};
+
+/** Источник следующего трека для цепочки: берёт пред-сген или генерит, греет след. */
+function nextEndlessSong(): Promise<Song> {
+  const s = nextSong;
+  if (s) {
+    nextSong = null;
+    pregenNext();
+    return Promise.resolve(s);
+  }
+  const p = newSongAsync(randomGenre());
+  pregenNext();
+  return p;
+}
 
 const randomGenre = (): GameGenre => GENRES[Math.floor(Math.random() * GENRES.length)];
 
@@ -260,6 +289,7 @@ const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => r()
 // --- игровой цикл ----------------------------------------------------------
 
 async function startRide() {
+  if (ENDLESS) { await startEndless(); return; }
   clearResults();
   showLoader(); // оверлей сразу: вся тяжёлая подготовка прячется за ним
   setLoader(10, 'генерируем трассу…');
@@ -306,6 +336,92 @@ async function startRide() {
   Object.assign(window as never, { __player: player, __game: game }); // отладка
 }
 
+/**
+ * Бесконечный сет: один Game и один Conductor живут всю сессию. Лоадер — только
+ * на входе из меню; дальше треки склеиваются цепочкой без остановки, без
+ * экрана результатов и без отсчёта. Награды/статистика — тикером на стыках.
+ */
+async function startEndless() {
+  clearResults();
+  showLoader();
+  setLoader(10, 'генерируем трассу…');
+  await nextPaint();
+  const song = nextSong ?? await newSongAsync(randomGenre());
+  nextSong = null;
+  // казино первого сегмента: lucky-ярлык; дальше цепочка решает сама
+  luckyRun = --runsUntilLucky <= 0;
+  if (luckyRun) runsUntilLucky = 4 + Math.floor(Math.random() * 3);
+  const gold = luckyRun || goldDrought >= 2 || Math.random() < 0.45;
+  goldDrought = gold ? 0 : goldDrought + 1;
+  conductor = new Conductor();
+  player = null;
+  segPrevScore = 0;
+  segPrevBlocks = 0;
+  const theme = pickTheme();
+  setLoader(40, 'строим мир…');
+  await nextPaint();
+  game = new Game(app, song, STUB_LEVEL, null, diff, audioOffsetMs / 1000,
+    { gold, mystery: luckyRun ? 3 : 2, lucky: luckyRun, best: loadBest()?.score ?? 0,
+      carColor: meta.skinColor, theme },
+    { conductor, nextSong: nextEndlessSong });
+  game.onSegment = onSegmentDone; // тикер + награда на каждом стыке
+  setLoader(65, 'настраиваем звук…');
+  await nextPaint();
+  await Tone.start();
+  await game.audioReady(); // reverb-IR первого трека готов — без глитча
+  setLoader(90, 'прогреваем графику…');
+  await nextPaint();
+  game.warmup();
+  setLoader(100, 'поехали!');
+  stopMenuSnow();
+  menu.style.display = 'none';
+  hideLoader();
+  game.start();
+  applyVolumes();
+  await conductor.start();
+  pregenNext();
+  Object.assign(window as never, { __game: game, __cond: conductor });
+}
+
+/** Стык сегментов: начислить ноты/XP за пройденный кусок и показать тикер. */
+function onSegmentDone() {
+  if (!game) return;
+  const dBlocks = Math.max(0, game.collected - segPrevBlocks);
+  const dScore = Math.max(0, game.score - segPrevScore);
+  segPrevBlocks = game.collected;
+  segPrevScore = game.score;
+  const earned = Math.round(dScore / 30);
+  applyRun({
+    blocks: dBlocks, maxCombo: game.maxCombo, magnets: game.magnetsGot,
+    mystery: game.mysteryGot, gold: game.goldGot,
+    noCrashSec: Math.round(game.noCrashSec), score: dScore,
+  }, earned);
+  // глобальный рекорд — живой, без финиша
+  const best = loadBest();
+  if (!best || game.score > best.score) saveBest({ score: game.score, combo: game.maxCombo });
+  refreshMenuMeta();
+  showTicker(`+${earned} ♪ · комбо ×${game.maxCombo} · блоков ${game.collected}`);
+}
+
+/** Ненавязчивый тикер сверху — руки не останавливаются (вместо модалки). */
+let tickerTimer = 0;
+function showTicker(text: string) {
+  let el = document.querySelector<HTMLDivElement>('.set-ticker');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'set-ticker';
+    el.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);'
+      + 'z-index:40;padding:.5rem 1rem;border-radius:999px;pointer-events:none;'
+      + 'background:rgba(12,14,22,.62);color:#dfe6f2;font:600 14px/1 system-ui,sans-serif;'
+      + 'text-shadow:0 1px 3px #000;backdrop-filter:blur(6px);transition:opacity .3s;opacity:0';
+    app.appendChild(el);
+  }
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(tickerTimer);
+  tickerTimer = window.setTimeout(() => { if (el) el.style.opacity = '0'; }, 2600);
+}
+
 function teardownRide() {
   pauseOverlay?.remove();
   pauseOverlay = null;
@@ -314,6 +430,8 @@ function teardownRide() {
   player = null;
   game?.dispose();
   game = null;
+  conductor?.dispose();
+  conductor = null;
 }
 
 /**
