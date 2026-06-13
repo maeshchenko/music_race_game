@@ -59,6 +59,30 @@ export class Sfx {
     this.thud.triggerAttackRelease(110, 0.07);
   }
 
+  /** Джекпот: победное арпеджио вверх, мимо троттлинга — событие редкое. */
+  jackpot() {
+    const now = Tone.now();
+    [84, 88, 91, 96].forEach((m, k) => {
+      const synth = this.pool[this.next++ % this.pool.length];
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.12, now + k * 0.07);
+    });
+  }
+
+  /** Щелчок барабана слот-машины. */
+  tick() {
+    const synth = this.pool[this.next++ % this.pool.length];
+    synth.triggerAttackRelease(1750, 0.018);
+  }
+
+  /** Мистери-блок: две быстрые «блёстки». */
+  mystery() {
+    const now = Tone.now();
+    [89, 94].forEach((m, k) => {
+      const synth = this.pool[this.next++ % this.pool.length];
+      synth.triggerAttackRelease(Tone.Frequency(m, 'midi').toFrequency(), 0.08, now + k * 0.05);
+    });
+  }
+
   /** Удар о преграду: низкий глухой бум. */
   crash() {
     this.thud.triggerAttackRelease(48, 0.3);

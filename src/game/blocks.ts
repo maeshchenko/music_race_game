@@ -43,13 +43,21 @@ export interface BlockDef {
   vel: number;
   /** Сколько нот склеено: множитель очков (кап 3) и размера. */
   count: number;
-  /** Обычный блок-нота или бонус-магнит. */
-  kind: 'note' | 'magnet';
+  /** Нота, бонус-магнит, золотой джекпот или мистери-«?». */
+  kind: 'note' | 'magnet' | 'gold' | 'mystery';
   collected: boolean;
   missed: boolean;
 }
 
+/** Казино-слой: есть ли в заезде золотой джекпот и сколько мистери-блоков. */
+export interface BlockExtras {
+  gold: boolean;
+  mystery: number;
+}
+
 const MAGNET_COLOR = new THREE.Color('#ffd24d');
+const GOLD_COLOR = new THREE.Color('#fff3a0');
+const MYSTERY_COLOR = new THREE.Color('#ffffff');
 const MAGNET_EVERY = [25, 40]; // раз в столько секунд трека, случайно
 
 export class Blocks {
@@ -57,8 +65,12 @@ export class Blocks {
   private defs: BlockDef[] = [];
   private cursor = 0; // первый блок, который ещё может быть собран/пропущен
   private dummy = new THREE.Object3D();
+  private colorTmp = new THREE.Color();
 
-  constructor(song: Song, level: Level, diff: Difficulty = 'norm') {
+  constructor(
+    song: Song, level: Level, diff: Difficulty = 'norm',
+    extras: BlockExtras = { gold: false, mystery: 0 },
+  ) {
     const cfg = DIFF_CFG[diff];
     const secPerTick = 60 / (song.ppq * song.bpm);
 
@@ -178,6 +190,32 @@ export class Blocks {
           missed: false,
         });
       }
+    }
+
+    // казино-слой: спец-блоки рядом с потоком, в средней части трека
+    {
+      const placeSpecial = (kind: 'gold' | 'mystery', frac: number) => {
+        const base = this.defs[Math.floor(this.defs.length * Math.min(0.92, frac))];
+        if (!base) return;
+        const dist = base.dist + 4;
+        this.defs.push({
+          dist,
+          lane: base.lane,
+          x: level.curveAt(dist) + base.lane * LANE_X,
+          y: level.heightAt(dist) + 0.9,
+          vel: 127,
+          count: 1,
+          kind,
+          collected: false,
+          missed: false,
+        });
+      };
+      // джекпот — неожиданно, где-то в середине
+      if (extras.gold) placeSpecial('gold', 0.35 + Math.random() * 0.4);
+      // мистери — равномерно по треку, со случайным сдвигом
+      for (let m = 0; m < extras.mystery; m++)
+        placeSpecial('mystery', (0.2 + 0.6 * (m / Math.max(1, extras.mystery - 1) || 0))
+          + Math.random() * 0.12);
       this.defs.sort((a, b) => a.dist - b.dist);
     }
 
@@ -193,7 +231,11 @@ export class Blocks {
       this.dummy.position.set(b.x, b.y, -b.dist);
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);
-      this.mesh.setColorAt(i, b.kind === 'magnet' ? MAGNET_COLOR : LANE_COLORS[b.lane + 1]);
+      this.mesh.setColorAt(i,
+        b.kind === 'magnet' ? MAGNET_COLOR
+        : b.kind === 'gold' ? GOLD_COLOR
+        : b.kind === 'mystery' ? MYSTERY_COLOR
+        : LANE_COLORS[b.lane + 1]);
     });
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
@@ -268,6 +310,7 @@ export class Blocks {
 
     // вращение и пульс ближних видимых
     const pulseAmp = fever ? 0.16 : 0.07;
+    let colorDirty = false;
     for (let i = this.cursor; i < this.defs.length; i++) {
       const b = this.defs[i];
       if (b.dist > carDist + 170) break;
@@ -277,6 +320,17 @@ export class Blocks {
         // бонус крутится заметно быстрее и крупнее
         this.dummy.rotation.set(time * 2.2, time * 3.1, 0);
         this.dummy.scale.setScalar(1.15 + Math.sin(time * 6) * 0.12);
+      } else if (b.kind === 'gold') {
+        // джекпот: крупный, бешено крутится, видно издалека
+        this.dummy.rotation.set(time * 3, time * 4.2, time * 1.5);
+        this.dummy.scale.setScalar(1.5 + Math.sin(time * 8) * 0.18);
+      } else if (b.kind === 'mystery') {
+        // «?»: крупный, дышит и переливается — что внутри, узнаешь на подборе
+        this.dummy.rotation.set(time * 1.3, time * 2.5, time * 1.2);
+        this.dummy.scale.setScalar(1.5 + Math.sin(time * 4.5) * 0.25);
+        this.colorTmp.setHSL((time * 0.9 + i * 0.13) % 1, 0.95, 0.7);
+        this.mesh.setColorAt(i, this.colorTmp);
+        colorDirty = true;
       } else {
         this.dummy.rotation.set(0, time * 1.4 + i * 0.7, time * 0.9 + i);
         const pulse = 1 + Math.sin(time * 5 + i) * pulseAmp;
@@ -287,6 +341,7 @@ export class Blocks {
       this.mesh.setMatrixAt(i, this.dummy.matrix);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
+    if (colorDirty && this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
   }
 
   dispose() {

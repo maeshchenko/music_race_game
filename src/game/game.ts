@@ -7,7 +7,7 @@ import type { Player } from 'midi-gen/audio';
 import { IS_MOBILE } from '../platform';
 import { World } from './world';
 import { buildCar } from './car';
-import { Blocks, LANE_COLORS, LANE_CSS, type Difficulty } from './blocks';
+import { Blocks, LANE_COLORS, LANE_CSS, type Difficulty, type BlockExtras } from './blocks';
 import { makeGate } from './gate';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
@@ -39,10 +39,18 @@ export class Game {
   combo = 0;
   maxCombo = 0;
   collected = 0;
+  bonusNotes = 0; // валюта сверх собранных блоков: джекпоты, мистери
   private missStreak = 0;
   private missLimit: number;
-  private fever = false;
+  /** Fever-уровни: x15/x30/x50 комбо → множитель ×2/×3/×4. */
+  private feverLevel = 0;
+  private get fever() { return this.feverLevel > 0; }
   private magnetUntil = -1; // время музыки, до которого активен магнит
+  private hitStop = 0; // сек заморозки мира — продаёт вес удара
+  private bloomPass: UnrealBloomPass | null = null;
+  private bpm: number;
+  private bestScore: number; // глобальный рекорд — призрак-цель в HUD
+  private recordBroken = false;
   // финиш: камера остаётся у ворот, машина катится по инерции и плавно тормозит
   private finished = false;
   private coastV = 0;
@@ -66,10 +74,18 @@ export class Game {
     private player: Player,
     diff: Difficulty = 'norm',
     private audioOffset = 0, // сек; калибровка из меню
+    extras: BlockExtras & { lucky?: boolean; best?: number } = { gold: false, mystery: 0 },
   ) {
     this.missLimit = diff === 'hard' ? 2 : 3;
+    this.bpm = song.bpm;
+    this.bestScore = extras.best ?? 0;
     this.world = new World((z) => level.heightAt(-z), (z) => level.curveAt(-z));
-    this.blocks = new Blocks(song, level, diff);
+    this.blocks = new Blocks(song, level, diff, extras);
+    // удачный заезд объявляем, когда машина уже едет
+    if (extras.lucky)
+      setTimeout(() => {
+        if (!this.disposed) this.pop('🔥 УДАЧНЫЙ ЗАЕЗД! НАГРАДЫ ×1.5', 'pop-combo pop-mega');
+      }, 1200);
     this.traffic = new Traffic(level, this.blocks, diff);
     this.world.scene.add(this.blocks.mesh, this.particles.points, this.traffic.root);
 
@@ -98,9 +114,10 @@ export class Game {
       // bloom: светится только яркое — неон-блоки, фонари, окна
       this.composer = new EffectComposer(this.renderer);
       this.composer.addPass(new RenderPass(this.world.scene, this.camera));
-      this.composer.addPass(new UnrealBloomPass(
+      this.bloomPass = new UnrealBloomPass(
         new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.5, 0.82,
-      ));
+      );
+      this.composer.addPass(this.bloomPass);
       this.composer.addPass(new OutputPass());
     }
 
@@ -215,10 +232,46 @@ export class Game {
       for (const m of [5, 10, 15, 20, 30, 50]) if (m < this.combo) down = m;
       this.combo = down;
     }
-    if (this.fever && this.combo < 15) {
-      this.fever = false;
-      this.feverEdge.classList.remove('on');
-    }
+    this.syncFever();
+  }
+
+  /**
+   * Fever-уровни и музыка следуют за комбо: x15/x30/x50 → fever I/II/III
+   * (×2/×3/×4), комбо ≥8/≥16 открывают слои трека. Рост уровня — событие,
+   * на подходе к fever края экрана плавно разгораются (предвкушение видно).
+   */
+  private syncFever() {
+    const lvl = this.combo >= 50 ? 3 : this.combo >= 30 ? 2 : this.combo >= 15 ? 1 : 0;
+    if (lvl > this.feverLevel) {
+      this.feverLevel = lvl;
+      this.pop(
+        lvl === 1 ? '🔥 FEVER x2' : lvl === 2 ? '🔥🔥 FEVER II x3' : '🔥🔥🔥 FEVER III x4',
+        'pop-combo pop-mega',
+      );
+      this.flash('#ff44ff');
+      this.shake = Math.max(this.shake, 0.6);
+    } else this.feverLevel = lvl;
+    this.feverEdge.className = `fever-edge${lvl ? ` on lvl${lvl}` : ''}`;
+    // пре-fever разогрев: x10–14 — края тлеют всё ярче
+    this.feverEdge.style.opacity =
+      lvl === 0 && this.combo >= 10 ? String(((this.combo - 9) / 6) * 0.5) : '';
+    // музыкальные слои: база / +chords·counter (x8) / всё (x16)
+    const tier = this.combo >= 16 ? 2 : this.combo >= 8 ? 1 : 0;
+    (this.player as Player & { setTier?: (t: number) => void }).setTier?.(tier);
+  }
+
+  /** Церемония рекорда на финише: золотой салют вокруг машины. */
+  celebrate() {
+    const gold = new THREE.Color('#ffd24d');
+    const { x, y, z } = this.car.position;
+    for (let k = 0; k < 3; k++)
+      setTimeout(() => {
+        if (this.disposed) return;
+        this.particles.burst(x + (Math.random() - 0.5) * 4, y + 1.5, z - 2 - k * 2, gold, 50);
+        this.shake = Math.min(0.5, this.shake + 0.25);
+      }, k * 220);
+    this.flash('#ffd24d');
+    this.sfx.jackpot();
   }
 
   private onMouse = (e: MouseEvent) => {
@@ -249,6 +302,15 @@ export class Game {
   }
 
   private tick(dt: number) {
+    // hit-stop: мир замирает на пару кадров — удар обретает вес;
+    // часы стоят, аудио уходит вперёд на <0.1с, мягкий ресинк догонит
+    if (this.hitStop > 0 && !this.paused) {
+      this.hitStop -= dt;
+      this.particles.update(dt * 0.25); // искры еле живут — кадр не мёртвый
+      if (this.composer) this.composer.render();
+      else this.renderer.render(this.world.scene, this.camera);
+      return;
+    }
     // мастер-часы — позиция музыки, но сглаженная: positionSec() дрожит
     // (outputLatency в Chrome плавает кадр к кадру), напрямую машина дёргается.
     // Ведём свои часы по dt и мягко подтягиваем к аудио.
@@ -359,6 +421,45 @@ export class Game {
           this.shake = Math.min(0.5, this.shake + 0.2);
           return;
         }
+        if (b.kind === 'gold') {
+          // джекпот: куш растёт с комбо — поймать на высоком стрике вкуснее
+          const pts = Math.round((100 + this.combo * 6) * (1 + this.feverLevel));
+          this.score += pts;
+          this.bonusNotes += 25;
+          this.pop(`💰 ДЖЕКПОТ +${pts}!`, 'pop-combo pop-mega');
+          this.flash('#ffd24d');
+          this.particles.burst(b.x, b.y, -b.dist, new THREE.Color('#fff3a0'), 60);
+          this.shake = Math.min(0.6, this.shake + 0.5);
+          this.hitStop = 0.07;
+          this.sfx.jackpot();
+          this.scoreBump();
+          return;
+        }
+        if (b.kind === 'mystery') {
+          // содержимое неизвестно до подбора — variable-ratio в чистом виде
+          const r = Math.random();
+          if (r < 0.45) {
+            const pts = Math.round((40 + this.combo * 4) * (1 + this.feverLevel));
+            this.score += pts;
+            this.pop(`❓ +${pts} ОЧКОВ`, 'pop-combo pop-mystery');
+          } else if (r < 0.7) {
+            this.magnetUntil = t + 8;
+            this.pop('❓ 🧲 МАГНИТ!', 'pop-combo pop-mystery');
+          } else if (r < 0.9) {
+            this.bonusNotes += 15;
+            this.pop('❓ ♪ +15 НОТ', 'pop-combo pop-mystery');
+          } else {
+            const pts = Math.round(250 * (1 + this.feverLevel));
+            this.score += pts;
+            this.pop(`❓ 💰 КУШ +${pts}!`, 'pop-combo pop-mega');
+          }
+          this.flash('#ffffff');
+          this.particles.burst(b.x, b.y, -b.dist, new THREE.Color('#ffffff'), 50);
+          this.shake = Math.min(0.5, this.shake + 0.3);
+          this.sfx.mystery();
+          this.scoreBump();
+          return;
+        }
         const hadMiss = this.missStreak > 0;
         this.missStreak = 0;
         this.combo++;
@@ -366,7 +467,7 @@ export class Game {
         this.collected++;
         const pts = Math.round(
           (10 + (b.vel / 127) * 10) * b.count *
-          (1 + Math.min(this.combo, 50) * 0.06) * (this.fever ? 2 : 1),
+          (1 + Math.min(this.combo, 50) * 0.06) * (1 + this.feverLevel),
         );
         this.score += pts;
         this.sfx.collect(this.combo, this.fever, b.count);
@@ -382,13 +483,7 @@ export class Game {
           this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
         }
         if (hadMiss && Math.random() < 0.4) this.pop('ДАВАЙ ЕЩЁ!', 'pop-combo');
-        if (!this.fever && this.combo >= 15) {
-          this.fever = true;
-          this.feverEdge.classList.add('on');
-          this.pop('🔥 FEVER x2', 'pop-combo pop-mega');
-          this.flash('#ff44ff');
-          this.shake = 0.6;
-        }
+        this.syncFever();
       },
       () => {
         // прощающее комбо: одиночный промах — тишина
@@ -412,6 +507,7 @@ export class Game {
       this.pop('💥', 'pop-combo pop-crash');
       this.flash('#ff4433');
       this.shake = 0.8;
+      this.hitStop = 0.09;
     }
 
     // микроцель: полоска до следующей вехи комбо
@@ -426,14 +522,36 @@ export class Game {
     }
     this.comboBarFill.style.width = `${((this.combo - lo) / (hi - lo)) * 100}%`;
 
+    // рекорд-призрак: погоня видна в реальном времени, не на результатах
+    let recPart = '';
+    if (this.bestScore > 0 && !this.finished) {
+      if (this.score > this.bestScore) {
+        if (!this.recordBroken) {
+          this.recordBroken = true;
+          this.pop('🏆 РЕКОРД ПОБИТ!', 'pop-combo pop-mega');
+          this.flash('#ffd24d');
+          this.shake = Math.max(this.shake, 0.5);
+        }
+        recPart = ` · 🏆 +${this.score - this.bestScore}`;
+      } else recPart = ` · 🏆 −${this.bestScore - this.score}`;
+    }
+
     const kmh = Math.round(this.level.speedAt(t) * 3.6);
     const fmt = (s: number) =>
       `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
     this.hud.textContent =
       `${this.score} очков${this.combo > 1 ? ` · x${this.combo}` : ''}` +
-      `${this.fever ? ' · 🔥x2' : ''}` +
+      `${this.fever ? ` · 🔥x${1 + this.feverLevel}` : ''}` +
       `${magnetActive ? ` · 🧲${Math.ceil(this.magnetUntil - t)}с` : ''}` +
+      recPart +
       ` · ${kmh} км/ч · ${fmt(t)} / ${fmt(this.level.durationSec)}`;
+
+    // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее
+    if (this.bloomPass && !this.paused) {
+      const phase = (t * this.bpm / 60) % 1;
+      const env = Math.max(0, 1 - phase * 3.2);
+      this.bloomPass.strength = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35);
+    }
 
     this.world.update(dt, this.car.position);
     if (this.composer) this.composer.render();

@@ -1,6 +1,6 @@
 import * as Tone from 'tone';
 import { type Song } from 'midi-gen/core';
-import { createPlayer, type Player } from 'midi-gen/audio';
+import { type Player } from 'midi-gen/audio';
 
 import { IS_MOBILE } from './platform';
 
@@ -12,7 +12,9 @@ Tone.setContext(new Tone.Context({
   latencyHint: 'playback',
   ...(IS_MOBILE ? { sampleRate: 24000 } : {}),
 }));
-import { newSong, songDurationSec, formatDuration, GENRES, type GameGenre } from './music';
+import {
+  newSong, songDurationSec, formatDuration, createStemPlayer, GENRES, type GameGenre,
+} from './music';
 import { Game } from './game/game';
 import { buildLevel } from './game/level';
 import type { Difficulty } from './game/blocks';
@@ -136,6 +138,26 @@ const loadBest = (): Rec | null => {
 };
 const saveBest = (r: Rec) => localStorage.setItem(BEST_KEY, JSON.stringify(r));
 
+// --- казино-слой: валюта-ноты, pity джекпота, «удачный заезд» --------------
+
+const NOTES_KEY = 'race2107:notes';
+let notesBalance = +(localStorage.getItem(NOTES_KEY) ?? '0') || 0;
+const addNotes = (n: number) => {
+  notesBalance += n;
+  localStorage.setItem(NOTES_KEY, String(notesBalance));
+};
+
+let goldDrought = 0; // заездов подряд без джекпота — на 3-м гарантия (pity)
+let runsUntilLucky = 2 + Math.floor(Math.random() * 3); // первый lucky — рано, на крючок
+let luckyRun = false;
+let wheelTimer = 0;
+
+/** Колесо фортуны: множитель нот за заезд. Решается заранее, анимация — декор. */
+function rollWheel(): number {
+  const r = Math.random();
+  return r < 0.5 ? 1 : r < 0.8 ? 1.5 : r < 0.95 ? 2 : 3;
+}
+
 // --- меню ------------------------------------------------------------------
 
 function genTracks() {
@@ -189,8 +211,15 @@ async function startRide() {
   }
   replayRequested = false;
   const song = tracks[sel];
-  player = createPlayer(song, { loop: false });
-  game = new Game(app, song, buildLevel(song), player, diff, audioOffsetMs / 1000);
+  // казино-слой заезда: lucky по счётчику, джекпот с pity, 1–2 мистери
+  luckyRun = --runsUntilLucky <= 0;
+  if (luckyRun) runsUntilLucky = 4 + Math.floor(Math.random() * 3);
+  const gold = luckyRun || goldDrought >= 2 || Math.random() < 0.45;
+  goldDrought = gold ? 0 : goldDrought + 1;
+  const mystery = luckyRun ? 3 : 2;
+  player = createStemPlayer(song);
+  game = new Game(app, song, buildLevel(song), player, diff, audioOffsetMs / 1000,
+    { gold, mystery, lucky: luckyRun, best: loadBest()?.score ?? 0 });
   // результаты — после финишного наката (машина докатилась), не по концу музыки
   game.onFinish = showResults;
   game.start();
@@ -218,32 +247,79 @@ function teardownRide() {
 function showResults() {
   if (!game) return;
   const song = tracks[sel];
-  const { score, maxCombo, collected, blocksTotal } = game;
+  const { score, maxCombo, collected, blocksTotal, bonusNotes } = game;
   const prev = loadRec(song.code, diff);
   if (!prev || score > prev.score) saveRec(song.code, diff, { score, combo: maxCombo });
   const best = loadBest();
   const isBest = !best || score > best.score;
   if (isBest) saveBest({ score, combo: maxCombo });
   game.releasePointer(); // курсор обратно — кликнуть кнопку оверлея
+  if (isBest && best) game.celebrate(); // золотой салют у машины
+
+  // ноты: блоки + бонусы, lucky ×1.5, колесо решено заранее (анимация — декор),
+  // начисляем сразу — ранний переход «дальше» ничего не теряет
+  const baseNotes = Math.round((collected + bonusNotes) * (luckyRun ? 1.5 : 1));
+  const wheelMult = rollWheel();
+  const earned = Math.round(baseNotes * wheelMult);
+  addNotes(earned);
 
   // дельта до рекорда: близость, не провал — главный крючок «ещё раз»
   const delta = !best ? ''
     : isBest ? `<div class="res-delta res-delta-up">рекорд побит на ${score - best.score}!</div>`
     : `<div class="res-delta">до рекорда не хватило ${best.score - score}</div>`;
 
-  let left = 5;
+  let left = 8;
   results = document.createElement('div');
   results.className = 'results-overlay';
   results.innerHTML = `
     <div class="res-title ${isBest ? 'rec-glow' : ''}">${isBest ? 'РЕКОРД!' : 'ФИНИШ'}</div>
     <div class="res-score">${score}</div>
     ${delta}
-    <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal} · ${song.genre}</div>
+    <div class="res-stats">комбо x${maxCombo} · блоки ${collected}/${blocksTotal} · ${song.genre}
+      ${luckyRun ? ' · 🔥 ×1.5' : ''}</div>
+    <div class="res-slot">
+      <span class="slot-label">♪ ${baseNotes}</span>
+      <span class="slot-window"><span class="slot-reel" id="reel"></span></span>
+      <span class="slot-total" id="wtotal"></span>
+    </div>
     <div class="res-next">следующий трек через <span id="cnt">${left}</span></div>
     <div><button id="res-replay" class="small">ЕЩЁ РАЗ (R)</button></div>
     <div class="res-hint">клик или пробел — сразу дальше · Esc — меню</div>
   `;
   app.appendChild(results);
+
+  // слот-машина: барабан прокручивается в окошке, замедляется,
+  // садится на выпавший множитель; исход решён заранее — анимация декор
+  const slotBox = results.querySelector<HTMLElement>('.res-slot')!;
+  const reelEl = results.querySelector<HTMLSpanElement>('#reel')!;
+  const wtotal = results.querySelector<HTMLSpanElement>('#wtotal')!;
+  const POOL = [1, 2, 1.5, 3, 1, 1.5, 2, 1];
+  const cells: number[] = [];
+  for (let i = 0; i < 15; i++) cells.push(POOL[i % POOL.length]);
+  cells.push(wheelMult); // последняя ячейка — выпавшее
+  reelEl.innerHTML = cells.map((v) => `<div class="slot-cell">×${v}</div>`).join('');
+  const cellH = 38; // высота .slot-cell, px
+  let idx = 0;
+  const spinStep = () => {
+    if (!results) return;
+    idx++;
+    const interval = 55 + Math.pow(idx, 1.7) * 5; // разгон → плавный дожим
+    reelEl.style.transitionDuration = `${Math.min(interval, 320)}ms`;
+    reelEl.style.transform = `translateY(${-idx * cellH}px)`;
+    game?.sfx.tick();
+    if (idx < cells.length - 1) {
+      wheelTimer = window.setTimeout(spinStep, interval);
+    } else {
+      // приземлились
+      wheelTimer = window.setTimeout(() => {
+        if (!results) return;
+        slotBox.classList.add(wheelMult >= 2 ? 'slot-win' : 'slot-done');
+        wtotal.textContent = `= ${earned} · всего ♪ ${notesBalance}`;
+        if (wheelMult >= 2) game?.sfx.jackpot();
+      }, 150);
+    }
+  };
+  wheelTimer = window.setTimeout(spinStep, 350);
   const cnt = results.querySelector<HTMLSpanElement>('#cnt')!;
   results.querySelector('#res-replay')!.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -260,6 +336,7 @@ function showResults() {
 
 function clearResults() {
   clearInterval(countdownTimer);
+  clearTimeout(wheelTimer);
   results?.remove();
   results = null;
 }
