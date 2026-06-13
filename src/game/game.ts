@@ -136,6 +136,7 @@ export class Game {
   onSegment?: () => void;
   private lastSeamT = 0; // транспортное время последнего отпразднованного стыка
   private finaleCamT = -1; // старт камео-флориша на финише трека
+  private finaleEnv = 0; // 0..1 огибающая финал-климакса (салют/блум/края)
   get blocksTotal() { return this.endless ? 0 : this.blocks.total; }
   private mouseX = 0; // -1..1
   private carX = 0;
@@ -663,10 +664,42 @@ export class Game {
    */
   private finale(t: number) {
     const t0 = performance.now(); // ДИАГНОСТИКА хрипа — НЕ УДАЛЯТЬ
-    this.celebrate(); // 3 волны золотых искр + вспышка + джекпот-арпеджио
-    this.pop('🏁 ТРЕК ПРОЙДЕН!', 'pop-combo pop-mega');
+    // #45 КЛИМАКС: ощутимый слоумо-фриз «прожить пик» + залпы салюта в небо
+    // волнами 1.8с + золотая вспышка краёв всего экрана + всплеск блума.
     this.finaleCamT = t;
-    this.shake = Math.max(this.shake, 0.5);
+    this.hitStop = Math.max(this.hitStop, 0.16); // ощутимая пауза-удар
+    this.shake = 0.95;
+    this.flash('#ffd24d');
+    this.sfx.jackpot();
+    this.sfx.boom(); // саб-бум — ощутимый «бах»
+    this.haptic([50, 70, 110]);
+    // климакс-ПЕРЕХОД (не «финиш» — едем дальше!): полноэкранная вспышка +
+    // тройная ударная волна + хайп-слэм + подпись со след. треком
+    const HYPE = ['ГОНИМ ДАЛЬШЕ!', 'ЕЩЁ ТРЕК!', 'ОГОНЬ — ДАЛЬШЕ!', 'НЕ ТОРМОЗИ!', 'ПОЕХАЛИ!', 'ДАВАЙ ЕЩЁ!'];
+    const hype = HYPE[Math.floor(Math.random() * HYPE.length)];
+    const genre = this.chain?.genreAt(t) ?? '';
+    const fx = document.createElement('div');
+    fx.className = 'finale-fx';
+    fx.innerHTML = '<div class="finale-flash"></div>'
+      + '<div class="finale-ring" style="--d:0s"></div>'
+      + '<div class="finale-ring" style="--d:.13s"></div>'
+      + '<div class="finale-ring" style="--d:.26s"></div>'
+      + `<div class="finale-text">${hype}</div>`
+      + `<div class="finale-sub">ДАЛЬШЕ${genre ? ': ' + genre.toUpperCase() : ''}</div>`;
+    this.fx.appendChild(fx);
+    setTimeout(() => fx.remove(), 1700);
+    const { x, y, z } = this.car.position;
+    // 10 залпов в небо/вокруг, с разлётом — масштабный фейерверк
+    for (let k = 0; k < 10; k++) {
+      setTimeout(() => {
+        if (this.disposed || this.paused) return;
+        this.particles.burst(
+          x + (Math.random() - 0.5) * 14, y + 1 + Math.random() * 4, z - 1 - Math.random() * 9,
+          k % 2 ? C_GOLD : C_GOLD_SPARK, 56, 2,
+        );
+        this.shake = Math.min(0.9, this.shake + 0.12);
+      }, k * 170);
+    }
     this.onSegment?.(); // тикер + ноты/XP за пройденный трек
     console.warn(`[finale] total ${(performance.now() - t0).toFixed(1)}ms @t=${t.toFixed(1)}`);
   }
@@ -938,13 +971,13 @@ export class Game {
     // камео-флориш финиша: камера отъезжает назад-вверх и плавно возвращается
     if (this.finaleCamT >= 0) {
       const ft = t - this.finaleCamT;
-      if (ft > 1.8 || ft < 0) this.finaleCamT = -1;
+      if (ft > 1.8 || ft < 0) { this.finaleCamT = -1; this.finaleEnv = 0; }
       else {
-        const env = Math.sin(Math.min(1, ft / 1.8) * Math.PI); // 0→1→0
-        this.camera.position.z += 9 * env; // отъезд назад
-        this.camera.position.y += 4 * env; // и вверх
+        this.finaleEnv = Math.sin(Math.min(1, ft / 1.8) * Math.PI); // 0→1→0
+        this.camera.position.z += 3 * this.finaleEnv; // лёгкий отъезд назад (не в космос)
+        this.camera.position.y += 1.2 * this.finaleEnv; // и чуть вверх
       }
-    }
+    } else this.finaleEnv = 0;
     // турбо: лёгкий сдвиг камеры (≈1 м назад, ≈3° вверх) + чуть FOV — ощущение
     // разгона дают в основном скоростные полосы/блум/блюр, а не «отъезд»
     if (this.nosVis > 0.01) {
@@ -1120,7 +1153,7 @@ export class Game {
       this.turboFx.style.setProperty('--tb', `${(this.nosVis * 7).toFixed(1)}px`);
 
       // #19/fever: края экрана централизованно (овердрайв > fever > пре-fever)
-      const edge = od ? 'fever-edge on overdrive'
+      const edge = (od || this.finaleEnv > 0.1) ? 'fever-edge on overdrive' // золото на финале/турбо
         : this.feverLevel ? `fever-edge on lvl${this.feverLevel}` : 'fever-edge';
       if (edge !== this.feverEdgeCls) { this.feverEdge.className = edge; this.feverEdgeCls = edge; }
       this.feverEdge.style.opacity =
@@ -1149,9 +1182,11 @@ export class Game {
     // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее.
     // присваиваем только при заметном изменении — лишние записи в пасс не нужны
     if (this.bloomPass && !this.paused) {
-      // #41 неон бьётся в бит глубже (0.14→0.22), + турбо + разогрев сессии
-      const s = 0.5 + 0.22 * beatEnv * beatEnv * (1 + this.feverLevel * 0.4) + this.nosVis * 0.55
-        + Math.min(this.sessionHeat, 16) * 0.02; // разогрев: мир всё ярче за долгую сессию
+      // #41 неон бьётся в бит глубже (0.14→0.22), + турбо + разогрев сессии.
+      // #39 динамика: ярче на пиках секции, мягче в затишье (energyAt 0..1)
+      const energy = this.level.energyAt(t);
+      const s = 0.42 + energy * 0.16 + 0.22 * beatEnv * beatEnv * (1 + this.feverLevel * 0.4)
+        + this.nosVis * 0.55 + Math.min(this.sessionHeat, 16) * 0.02 + this.finaleEnv * 0.9;
 
       if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }

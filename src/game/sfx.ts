@@ -162,6 +162,13 @@ export class Sfx {
     });
   }
 
+  /** Финал-климакс: глубокий саб-бум (ощутимый «бах»). */
+  boom() {
+    const now = this.soon();
+    this.kick.triggerAttackRelease('C0', 0.7, now, 1);
+    this.kick.triggerAttackRelease('G0', 0.5, now + 0.02, 0.8);
+  }
+
   /** Удар о преграду: низкий глухой бум. */
   crash() {
     const now = this.soon();

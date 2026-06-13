@@ -98,7 +98,7 @@ export class EndlessChain implements Level {
     // ложатся ровно на ту же дорогу, что и машина — без шва.
     const geoLevel: Level = {
       durationSec: level.durationSec, totalDist: level.totalDist,
-      distAt: level.distAt, speedAt: level.speedAt,
+      distAt: level.distAt, speedAt: level.speedAt, energyAt: level.energyAt,
       curveAt: (d) => this.road.curveAt(distOffset + d),
       heightAt: (d) => this.road.heightAt(distOffset + d),
     };
@@ -239,6 +239,18 @@ export class EndlessChain implements Level {
   // геометрия — глобальная непрерывная дорога (одна на сессию), без швов
   heightAt(d: number): number { return this.road.heightAt(d); }
   curveAt(d: number): number { return this.road.curveAt(d); }
+
+  /** Жанр трека, звучащего в момент t — для подписи на стыке. */
+  genreAt(t: number): string {
+    const s = this.segAtTime(t);
+    return s ? s.song.genre : '';
+  }
+
+  /** Энергия секции текущего трека (0..1) — для динамики света (#39). */
+  energyAt(t: number): number {
+    const s = this.segAtTime(t);
+    return s ? s.level.energyAt(t - s.tOffset) : 0.5;
+  }
 
   dispose() {
     for (const seg of this.segments) {

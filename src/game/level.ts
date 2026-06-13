@@ -19,6 +19,8 @@ export interface Level {
   heightAt(dist: number): number;
   /** Боковое смещение оси дороги (м) на дистанции dist — повороты. */
   curveAt(dist: number): number;
+  /** Энергия секции (0..1) в момент t секунд — для динамики света/сведения (#39). */
+  energyAt(t: number): number;
 }
 
 // скорость = база + bpm·коэф: компрессия, чтобы быстрые треки (BPM 150+) не
@@ -217,5 +219,6 @@ const VREF = 30; // ~108 км/ч
     speedAt: (t) => sampleT(vArr, t),
     heightAt: (d) => sample(hArr, d),
     curveAt: (d) => sample(xArr, d),
+    energyAt: (t) => energyAt(t),
   };
 }

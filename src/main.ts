@@ -108,7 +108,7 @@ const ENDLESS = true;
 /** Заглушка-уровень: в endless геометрия идёт из цепочки, этот не сэмплится. */
 const STUB_LEVEL: Level = {
   durationSec: 0, totalDist: 0,
-  distAt: () => 0, speedAt: () => 25, heightAt: () => 0, curveAt: () => 0,
+  distAt: () => 0, speedAt: () => 25, heightAt: () => 0, curveAt: () => 0, energyAt: () => 0.5,
 };
 
 /** Источник следующего трека для цепочки: берёт пред-сген или генерит, греет след. */
