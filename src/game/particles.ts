@@ -29,7 +29,11 @@ export class Particles {
     this.points.frustumCulled = false;
   }
 
-  burst(x: number, y: number, z: number, color: THREE.Color, count = 16) {
+  /**
+   * Взрыв искр. vzBias — снос по z: <0 вперёд (по движению), >0 НА камеру
+   * (#40 directional hit-feedback: обломки летят на игрока, удар «весит»).
+   */
+  burst(x: number, y: number, z: number, color: THREE.Color, count = 16, vzBias = -4) {
     for (let k = 0; k < count; k++) {
       const i = this.head++ % N;
       this.pos[i * 3] = x;
@@ -39,7 +43,7 @@ export class Particles {
       const r = 2 + Math.random() * 5;
       this.vel[i * 3] = Math.cos(a) * r;
       this.vel[i * 3 + 1] = 2 + Math.random() * 4.5;
-      this.vel[i * 3 + 2] = Math.sin(a) * r - 4; // сноп чуть вперёд, к движению
+      this.vel[i * 3 + 2] = Math.sin(a) * r + vzBias;
       this.life[i] = 0.5 + Math.random() * 0.4;
       this.col[i * 3] = color.r;
       this.col[i * 3 + 1] = color.g;

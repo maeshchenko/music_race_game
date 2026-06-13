@@ -184,8 +184,8 @@ export class Conductor {
    * Турбо: множитель темпа (1 — норма). Поднимает bpm → тики идут быстрее →
    * музыка/блоки/машина синхронно ускоряются, питч тот же. Плавный рамп.
    */
-  setRate(rate: number) {
-    this.transport.bpm.rampTo(BASE_BPM * rate, 0.3);
+  setRate(rate: number, dur = 0.3) {
+    this.transport.bpm.rampTo(BASE_BPM * rate, dur);
   }
 
   /**

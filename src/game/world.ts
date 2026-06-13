@@ -214,6 +214,8 @@ export class World {
   private SNOW_N: number;
   private readonly SNOW_BOX = new THREE.Vector3(50, 22, 70);
   private hemi: THREE.HemisphereLight;
+  // #16 материалы, пульсирующие по биту (эмиссив окон/фонарей, ореолы)
+  private pulseTargets!: { mat: THREE.Material; prop: string; base: number; amp: number }[];
 
   constructor(
     private hAt: HeightFn = () => 0,
@@ -256,9 +258,30 @@ export class World {
       this.pooled.push(l);
     }
 
+    // #16 бит-пульс мира: эмиссивы/ореолы «дышат» на каждую долю → ритм-транс.
+    // Собираем целевые материалы и их базовые значения один раз.
+    this.pulseTargets = [
+      { mat: this.lampHeadMat, prop: 'emissiveIntensity', base: this.lampHeadMat.emissiveIntensity, amp: 0.5 },
+      { mat: this.kioskWinMat, prop: 'emissiveIntensity', base: this.kioskWinMat.emissiveIntensity, amp: 0.5 },
+      { mat: this.stopLightMat, prop: 'emissiveIntensity', base: this.stopLightMat.emissiveIntensity, amp: 0.5 },
+      { mat: this.coneMat, prop: 'opacity', base: this.coneMat.opacity, amp: 0.8 },
+      { mat: this.poolMat, prop: 'opacity', base: this.poolMat.opacity, amp: 0.45 },
+      ...this.kinds.map((k) => {
+        const side = k.mats[0] as THREE.MeshLambertMaterial;
+        return { mat: side, prop: 'emissiveIntensity' as const, base: side.emissiveIntensity, amp: 0.4 };
+      }),
+    ];
+
     for (let i = 0; i < CHUNKS; i++) this.chunks.push(this.makeChunk(i));
 
     this.buildSnow();
+  }
+
+  /** Пульс эмиссивов по доле (env 0..1) — окна/фонари «дышат» в бит. */
+  private pulse(env: number) {
+    for (const t of this.pulseTargets) {
+      (t.mat as unknown as Record<string, number>)[t.prop] = t.base * (1 + env * t.amp);
+    }
   }
 
   /**
@@ -535,7 +558,8 @@ export class World {
     chunk.lampHeads = fresh.lampHeads;
   }
 
-  update(dt: number, carPos: THREE.Vector3) {
+  update(dt: number, carPos: THREE.Vector3, beatEnv = 0) {
+    this.pulse(beatEnv); // #16 окна/фонари дышат в бит
     // переезд чанков
     for (const c of this.chunks) {
       if (-c.index * CHUNK_LEN - CHUNK_LEN > carPos.z + CHUNK_LEN * 1.5)

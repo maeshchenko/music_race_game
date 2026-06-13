@@ -347,6 +347,12 @@ export class Game {
     }
   };
 
+  /** #14 тактильная отдача (мобайл/поддерживающие устройства) — no-op иначе. */
+  private haptic(ms: number | number[]) {
+    try { (navigator as Navigator & { vibrate?: (p: number | number[]) => boolean }).vibrate?.(ms); }
+    catch { /* не поддержано */ }
+  }
+
   /** Цветная вспышка у машины. */
   private flash(css: string) {
     const el = document.createElement('div');
@@ -542,8 +548,9 @@ export class Game {
     this.scoreBump();
     const milestone = this.popFx();
     // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
+    // #40 directional: обломки летят НА камеру (vzBias +6) — «снёс блок собой»
     this.particles.burst(b.x, b.y, wz, golden ? C_GOLD_SPARK : VOICE_COLORS[b.voice],
-      12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2);
+      12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2, 6);
     if (perfect) {
       this.particles.burst(b.x, b.y + 0.3, wz, C_PERFECT, 8);
       if (!milestone && this.combo % 3 === 0) this.pop('PERFECT', 'pop-perfect');
@@ -551,6 +558,7 @@ export class Game {
     if (milestone) {
       this.flash(VOICE_CSS[b.voice]);
       this.shake = Math.min(0.45, this.shake + 0.3);
+      this.haptic(12);
     } else if (b.count > 1) {
       this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
     }
@@ -779,20 +787,23 @@ export class Game {
     // (отпускание кнопки не останавливает разряд)
     if (this.nosHeld && this.energy >= 1 && !this.nosActive && !this.paused) {
       this.nosActive = true;
-      this.conductor?.setRate(1.25); // РЕАЛЬНЫЙ разгон: темп+блоки+машина ×1.25
+      this.conductor?.setRate(1.18, 0.3); // РЕАЛЬНЫЙ разгон ×1.18, быстрый поджиг
       this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
       this.flash('#ffd24d');
       this.shake = Math.min(0.6, this.shake + 0.4);
+      this.haptic([20, 30, 50]);
     }
     if (this.nosActive) {
       this.energy = Math.max(0, this.energy - dt / 6); // полный бак ≈ 6 с
       if (this.energy <= 0) {
         this.nosActive = false;
-        this.conductor?.setRate(1);
+        // азот кончился — НЕ тормоз в стену: плавный накат к норме за ~1.6с
+        this.conductor?.setRate(1, 1.6);
         if (IS_MOBILE) this.nosHeld = false;
       }
     }
-    this.nosVis += ((this.nosActive ? 1 : 0) - this.nosVis) * Math.min(1, dt * 8);
+    // вверх быстро (поджиг), вниз медленно (накат к норме по кривой, как тает азот)
+    this.nosVis += ((this.nosActive ? 1 : 0) - this.nosVis) * Math.min(1, dt * (this.nosActive ? 8 : 2));
 
     // #18 золотые волны: внезапно ряд блоков «золотой» на ~3с — variable-ratio
     // сюрприз (×2.5 очки + золотые искры). Старт по случайному таймеру.
@@ -803,6 +814,11 @@ export class Game {
       this.pop('🌟 ЗОЛОТАЯ ВОЛНА! ×2.5', 'pop-combo pop-mega');
       this.flash('#ffd24d');
     }
+
+    // #15/#16/#41 бит-огибающая доли (1 на удар → спад) — единый пульс для
+    // камеры, мира (окна/фонари) и блума. Это и есть ритм-транс.
+    if (this.endless && this.chain) this.bpm = this.chain.bpmAt(t);
+    const beatEnv = Math.max(0, 1 - ((t * this.bpm / 60) % 1) * 3.2);
 
     // конец трека → фаза наката: своя интеграция вместо distAt
     if (!this.finished && t >= this.level.durationSec - 0.03) {
@@ -920,8 +936,9 @@ export class Game {
       this.camera.position.z += 0.12 * this.nosVis;
       this.camera.position.y -= 0.08 * this.nosVis; // чуть НИЖЕ обычного (~0.5° вниз)
     }
-    const fov = 62 + 0.6 * this.nosVis;
-    if (Math.abs(fov - this.camera.fov) > 0.1) {
+    // #15 камера слегка «вдыхает» на долю (zoom-in пульс), + турбо-рывок
+    const fov = 62 + 0.6 * this.nosVis - beatEnv * 0.7;
+    if (Math.abs(fov - this.camera.fov) > 0.03) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
@@ -1004,6 +1021,7 @@ export class Game {
         this.flash('#ff4433');
         this.shake = 0.8;
         this.hitStop = 0.09;
+        this.haptic(60);
         this.lastCrashT = t;
         // авария — явный сигнал «тяжело»: роняем интенсивность
         this.trackHit(false); this.trackHit(false); this.trackHit(false);
@@ -1028,7 +1046,7 @@ export class Game {
     }
 
     // реальная скорость выше на множитель турбо (время трека идёт быстрее)
-    const kmh = Math.round(this.level.speedAt(t) * 3.6 * (1 + 0.25 * this.nosVis));
+    const kmh = Math.round(this.level.speedAt(t) * 3.6 * (1 + 0.18 * this.nosVis));
     // HUD и комбо-полоса — ~15 Гц: на глаз неотличимо, но вчетверо меньше
     // сборки строк и DOM-записей (счёт «вздрагивает» отдельно в scoreBump)
     this.hudAcc += dt;
@@ -1115,17 +1133,17 @@ export class Game {
 
     // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее.
     // присваиваем только при заметном изменении — лишние записи в пасс не нужны
-    if (this.endless && this.chain) this.bpm = this.chain.bpmAt(t); // пульс под текущий трек
     if (this.bloomPass && !this.paused) {
-      const phase = (t * this.bpm / 60) % 1;
-      const env = Math.max(0, 1 - phase * 3.2);
-      const s = 0.5 + 0.14 * env * env * (1 + this.feverLevel * 0.35) + this.nosVis * 0.55
+      // #41 неон бьётся в бит глубже (0.14→0.22), + турбо + разогрев сессии
+      const s = 0.5 + 0.22 * beatEnv * beatEnv * (1 + this.feverLevel * 0.4) + this.nosVis * 0.55
         + Math.min(this.sessionHeat, 16) * 0.02; // разогрев: мир всё ярче за долгую сессию
 
       if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }
 
-    this.world.update(dt, this.car.position);
+    // #44 палитра «разогревается» с комбо — ярче экспозиция (видимый рост)
+    if (!this.paused) this.renderer.toneMappingExposure = 1.05 + Math.min(this.combo, 60) * 0.0035;
+    this.world.update(dt, this.car.position, beatEnv); // #16 окна/фонари дышат в бит
     if (this.composer) this.composer.render();
     else this.renderer.render(this.world.scene, this.camera);
 
