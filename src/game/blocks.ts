@@ -98,8 +98,10 @@ export interface BlockDef {
   power?: 'magnet' | 'shield' | 'double' | 'triple' | 'ram';
   collected: boolean;
   missed: boolean;
-  /** Хореографированный паттерн (Фаза B): свип-змейка или стена. */
-  pattern?: 'sweep' | 'wall';
+  /** Хореографированный паттерн полосы: волна/стена/зигзаг/лесенка/маятник/дабл. */
+  pattern?: 'sweep' | 'wall' | 'zigzag' | 'stairs' | 'pendulum' | 'double';
+  /** Блок-кульминация музыкального дропа (тост «ДРОП!» + всплеск). */
+  drop?: boolean;
   /** Широкий «МЕГА»-блок (Фаза B): крупный, широкая зона сбора, ×2 очки. */
   wide?: boolean;
   /** DDA: блок убран прорежением — не собирается и не считается промахом. */
@@ -160,13 +162,45 @@ export class Blocks {
     // по силе доли. Блоки садятся СЮДА — игра в ритм. Мелодия-соло берётся только
     // в безритмовых тактах (барабанов нет, держится одна нота).
     const grid = buildBeatGrid(song);
-    const { slots } = extractRhythm(song, grid);
+    const { slots, activityPerBar, bars } = extractRhythm(song, grid);
     const allowed = new Set(cfg.beats);
 
-    // мелодия = ВЕДУЩИЙ голос игры (её ты «играешь»). Берём ноты одной ведущей
-    // роли по приоритету lead>counter>arp (lead — настоящий мотив; arp — текстура,
-    // в крайнем случае). Берём ЩЕДРО на ВСЕХ позициях (вкл. синкопы) — мелодия
-    // и есть «busy»-слой. Бас/барабаны = только ПУЛЬС на сильную/слабую долю.
+    // СЛОЙ МУЗЫКАЛЬНОЙ СТРУКТУРЫ: энергия по тактам (онсеты ритм-секции) → видим,
+    // где затишье, где разгон, где дроп. На этом строится драматургия паттернов
+    // (тихо — мягкая волна, громко — драйв) и привязка наград к пику (дофамин:
+    // build-up видно издалека, кульминация приносит джекпот).
+    const barSec = grid.barTicks * grid.secPerTick;
+    // сглаживание ±1 такт, нормировка по максимуму → energy[bar] ∈ [0,1]
+    const energy = new Array<number>(bars).fill(0);
+    {
+      let maxE = 1;
+      for (let i = 0; i < bars; i++) {
+        const e = (activityPerBar[i - 1] ?? 0) * 0.5 + activityPerBar[i]
+          + (activityPerBar[i + 1] ?? 0) * 0.5;
+        energy[i] = e;
+        if (e > maxE) maxE = e;
+      }
+      for (let i = 0; i < bars; i++) energy[i] /= maxE;
+    }
+    const energyAtTime = (t: number) =>
+      energy[Math.max(0, Math.min(bars - 1, Math.floor(t / barSec)))] ?? 0;
+    // ДЕТЕКТ ДРОПОВ: такт громкий (energy>0.6) И заметно громче предыдущего окна
+    // (build-up→взрыв). Берём время начала такта-дропа; пик музыки = пик игры.
+    const dropTimes: number[] = [];
+    for (let i = 2; i < bars; i++) {
+      const prevAvg = (energy[i - 1] + energy[i - 2]) * 0.5;
+      if (energy[i] > 0.6 && energy[i] - prevAvg > 0.22) {
+        const t = i * barSec;
+        if (t > 6 && t < level.durationSec - 6
+            && (dropTimes.length === 0 || t - dropTimes[dropTimes.length - 1] > 6))
+          dropTimes.push(t);
+      }
+    }
+
+    // блоки ведёт РИТМ-секция (kick/snare/bass на доли). Lead-соло — лишь РЕДКИЙ
+    // акцент-цвет на сильную долю, опущенный в средний регистр (раньше lead-соло
+    // доминировало → высокие «пищащие» блоки не в ритм). Берём ведущую роль по
+    // приоритету lead>counter>arp только как источник этих редких акцентов.
     const MELODY_ROLES = ['lead', 'counter', 'arp'] as const;
     const leadRole = MELODY_ROLES.find((r) => song.tracks.some((t) => t.role === r));
     const leadNotes = leadRole
@@ -191,12 +225,16 @@ export class Blocks {
         : s.sources.has('snare') ? 'snare' : 'kick';
       picks.push({ t: s.tick * grid.secPerTick, pitch: s.pitch, vel: s.vel, beat, voice });
     }
-    // 2) МЕЛОДИЯ: тональные блоки на их позиции — всегда (это «песня, что играешь»)
+    // 2) LEAD-АКЦЕНТ: РЕДКО — нота только на сильную долю, с кулдауном ~3.5с, и
+    //    опущенная в средний регистр (не пищит). Капля мелодии-цвета поверх ритма.
+    let lastLeadT = -100;
     for (const n of leadNotes) {
-      picks.push({
-        t: n.start * grid.secPerTick, pitch: n.pitch, vel: n.vel,
-        beat: beatOf(classifyTick(n.start, grid)), voice: 'lead',
-      });
+      if (classifyTick(n.start, grid) !== 'strong') continue; // только сильная доля
+      const t = n.start * grid.secPerTick;
+      if (t - lastLeadT < 3.5) continue; // редко
+      lastLeadT = t;
+      let lp = n.pitch; while (lp > 74) lp -= 12; // в средний регистр (анти-«писк»)
+      picks.push({ t, pitch: lp, vel: n.vel, beat: 'strong', voice: 'lead' });
     }
     picks.sort((a, b) => a.t - b.t);
 
@@ -219,71 +257,129 @@ export class Blocks {
       }
     }
 
-    // кап плотности: не чаще maxPerSec. В конфликте держим важнейшее — мелодию
-    // (большой бонус lead), затем силу доли. Поток = «играбельная песня» в бит.
+    // кап плотности: не чаще maxPerSec. Поток ведёт РИТМ; редкий lead-акцент имеет
+    // умеренный бонус (переживает конфликт, но не доминирует), затем сила доли.
     const weight = (c: Cluster) =>
-      (c.voice === 'lead' ? 100 : 0) + BEAT_RANK[c.beat] * 4 + VOICE_RANK[c.voice];
+      (c.voice === 'lead' ? 20 : 0) + BEAT_RANK[c.beat] * 4 + VOICE_RANK[c.voice];
     const minGap = 1 / cfg.maxPerSec;
     const stream: Cluster[] = [];
     for (const c of clusters) {
       const last = stream[stream.length - 1];
       if (last && c.t - last.t < minGap) {
-        if (weight(c) > weight(last)) stream[stream.length - 1] = c;
+        // важнейший побеждает, но ОСТАЁТСЯ на раннем (на-бите) времени — иначе блок
+        // уезжает на время победителя (до minGap позже) → ощущение отставания ритма.
+        if (weight(c) > weight(last)) stream[stream.length - 1] = { ...c, t: last.t };
         continue;
       }
       stream.push(c);
     }
 
-    // полосы: обычно мелодический контур, но периодически — ХОРЕОГРАФИЯ
-    // (вариативность Фазы B): свип (вис край-в-край) или стена (серия в одной
-    // полосе). Достижимость (±1 за шаг, не чаще laneShiftGap) сохраняется.
+    // полосы: обычно мелодический контур, но периодически — ХОРЕОГРАФИЯ. Словарь
+    // паттернов (читаемые фигуры → мозг предсказывает → дофамин), выбор по ЭНЕРГИИ
+    // секции: тихо — мягкая волна/лесенка, громко — драйв (зигзаг/стена/дабл).
+    // Перед дропом — РАЗГОН (маятник), НА дропе — короткий burst + кульминация-блок.
+    // Достижимость (±1 за шаг, не чаще laneShiftGap) сохраняется во всех паттернах.
+    type PatName = 'sweep' | 'wall' | 'zigzag' | 'stairs' | 'pendulum' | 'double';
+    const pickFrom = (a: PatName[]): PatName => a[Math.floor(Math.random() * a.length)];
     let lane = 0;
     let lastShiftT = -10;
     let lastFarT = -100;
     let prevPitch: number | null = null;
     let patUntil = -1; // конец активного паттерна
-    let patKind = 0; // 0 — свип, 1 — стена (hold)
-    let patDir = 1; // направление свипа
+    let patName: PatName = 'sweep';
+    let patDir = 1; // направление (свип/лесенка/маятник)
+    let patPivot = 1; // край для зигзага (бьём 0↔patPivot)
+    let holdCount = 0; // дабл-тап: сколько блоков держим полосу
     let nextPatT = 10 + Math.random() * 16; // когда можно начать следующий паттерн
+    let dropIdx = 0; // курсор по временам дропов
+    let markDrop = false; // пометить ближайший блок как кульминацию дропа
     for (const c of stream) {
       const dPitch = prevPitch === null ? 0 : c.pitch - prevPitch;
       prevPitch = c.pitch;
       const canShift = c.t - lastShiftT >= cfg.laneShiftGap;
+
+      // ДРОП: пересекли время дропа → этот блок = кульминация (wide+drop), запускаем
+      // короткий burst (стена/зигзаг). Срабатывает независимо от текущего паттерна.
+      if (dropIdx < dropTimes.length && c.t >= dropTimes[dropIdx]) {
+        markDrop = true;
+        patName = Math.random() < 0.5 ? 'wall' : 'zigzag';
+        patUntil = c.t + 1.8 + Math.random() * 0.8; // короткий взрыв ~1.8–2.6с
+        patPivot = lane >= 1 ? 1 : lane <= -1 ? -1 : (Math.random() < 0.5 ? -1 : 1);
+        nextPatT = patUntil + 6 + Math.random() * 8;
+        dropIdx++;
+      }
+
       // старт паттерна — по кулдауну, не у самого конца трека
       if (patUntil < 0 && c.t >= nextPatT && c.t < level.durationSec - 8) {
-        patUntil = c.t + 4 + Math.random() * 3; // длиннее (4–7с) → явно читается
-        patKind = Math.random() < 0.55 ? 0 : 1;
-        patDir = lane >= 1 ? -1 : lane <= -1 ? 1 : (Math.random() < 0.5 ? -1 : 1);
-        nextPatT = patUntil + 6 + Math.random() * 8; // чаще (пауза 6–14с)
+        const nextDrop = dropTimes[dropIdx];
+        if (nextDrop !== undefined && nextDrop > c.t && nextDrop - c.t <= 7) {
+          // РАЗГОН к дропу: маятник во всю ширину до самого дропа
+          patName = 'pendulum';
+          patUntil = nextDrop;
+          patDir = lane >= 1 ? -1 : lane <= -1 ? 1 : (Math.random() < 0.5 ? -1 : 1);
+        } else {
+          const e = energyAtTime(c.t);
+          patName = e < 0.35 ? pickFrom(['sweep', 'stairs'])
+            : e < 0.7 ? pickFrom(['zigzag', 'sweep', 'double'])
+            : pickFrom(['zigzag', 'wall', 'double']);
+          // стена короче (плотный ритм → иначе 20-30 блоков в один ряд); прочие 4–7с
+          patUntil = c.t + (patName === 'wall' ? 1.6 + Math.random() * 1.2 : 4 + Math.random() * 3);
+          patDir = patName === 'stairs'
+            ? (dPitch > 0 ? 1 : dPitch < 0 ? -1 : (Math.random() < 0.5 ? -1 : 1))
+            : lane >= 1 ? -1 : lane <= -1 ? 1 : (Math.random() < 0.5 ? -1 : 1);
+          patPivot = lane >= 1 ? 1 : lane <= -1 ? -1 : (Math.random() < 0.5 ? -1 : 1);
+          nextPatT = patUntil + 6 + Math.random() * 8; // пауза 6–14с
+        }
+        holdCount = 0;
       }
       if (c.t >= patUntil && patUntil > 0) patUntil = -1; // паттерн кончился
-      if (canShift) {
-        if (patUntil > 0 && patKind === 0) {
-          // СВИП: ведём полосу край-в-край, разворот у краёв
+
+      if (patUntil > 0) holdCount++;
+      if (canShift && patUntil > 0) {
+        if (patName === 'sweep' || patName === 'pendulum') {
+          // ВОЛНА/МАЯТНИК: ведём полосу край-в-край, разворот у краёв
           if (lane >= 1) patDir = -1; else if (lane <= -1) patDir = 1;
           if (lane + patDir >= -1 && lane + patDir <= 1) { lane += patDir; lastShiftT = c.t; }
-        } else if (patUntil > 0 && patKind === 1) {
-          // СТЕНА: держим полосу (серия блоков в одной линии) — ничего не двигаем
-        } else {
-          // мелодический контур
-          let dir = 0;
-          if (dPitch > 1) dir = 1;
-          else if (dPitch < -1) dir = -1;
-          if (cfg.farJump && Math.abs(dPitch) > 12 && Math.abs(lane) === 1 &&
-              Math.sign(dir) === -Math.sign(lane) && c.t - lastFarT > FAR_JUMP_COOLDOWN &&
-              c.t - lastShiftT >= cfg.laneShiftGap * 1.5) {
-            lane = -lane;
-            lastFarT = c.t;
-            lastShiftT = c.t;
-          } else if (dir !== 0 && lane + dir >= -1 && lane + dir <= 1) {
-            lane += dir;
-            lastShiftT = c.t;
-          } else if (dir === 0 && lane !== 0 && c.t - lastShiftT >= cfg.laneShiftGap * 2.2) {
-            lane += lane > 0 ? -1 : 1; // без мелодического движения — дрейф к центру
-            lastShiftT = c.t;
+        } else if (patName === 'zigzag') {
+          // ЗИГЗАГ: упругий отскок центр↔край (узкая амплитуда, бодро)
+          const target = lane === 0 ? patPivot : 0;
+          const dir = Math.sign(target - lane);
+          if (dir !== 0) { lane += dir; lastShiftT = c.t; }
+        } else if (patName === 'stairs') {
+          // ЛЕСЕНКА: монотонный забег в одну сторону; у края — паттерн завершён
+          if (lane + patDir >= -1 && lane + patDir <= 1) { lane += patDir; lastShiftT = c.t; }
+          else patUntil = -1; // дошли до края — «забег» прочитан, выходим
+        } else if (patName === 'double') {
+          // ДАБЛ-ТАП: держим полосу 2 блока, затем шаг (мелодия/дрейф к центру)
+          if (holdCount >= 2) {
+            let dir = dPitch > 1 ? 1 : dPitch < -1 ? -1 : 0;
+            if (dir === 0) dir = lane > 0 ? -1 : lane < 0 ? 1 : (Math.random() < 0.5 ? -1 : 1);
+            if (lane + dir >= -1 && lane + dir <= 1) { lane += dir; lastShiftT = c.t; holdCount = 0; }
           }
         }
+        // 'wall' — держим полосу (серия в одной линии), ничего не двигаем
+      } else if (canShift) {
+        // мелодический контур (вне паттерна)
+        let dir = 0;
+        if (dPitch > 1) dir = 1;
+        else if (dPitch < -1) dir = -1;
+        if (cfg.farJump && Math.abs(dPitch) > 12 && Math.abs(lane) === 1 &&
+            Math.sign(dir) === -Math.sign(lane) && c.t - lastFarT > FAR_JUMP_COOLDOWN &&
+            c.t - lastShiftT >= cfg.laneShiftGap * 1.5) {
+          lane = -lane;
+          lastFarT = c.t;
+          lastShiftT = c.t;
+        } else if (dir !== 0 && lane + dir >= -1 && lane + dir <= 1) {
+          lane += dir;
+          lastShiftT = c.t;
+        } else if (dir === 0 && c.t - lastShiftT >= cfg.laneShiftGap * 1.6) {
+          // ритм-блоки ПЛОСКИЕ по питчу → без этого копился ряд 20-30 в одну линию.
+          // Мягкое блуждание ±1: от края к центру, из центра — в случайный край.
+          lane += lane !== 0 ? (lane > 0 ? -1 : 1) : (Math.random() < 0.5 ? -1 : 1);
+          lastShiftT = c.t;
+        }
       }
+      const isDrop = markDrop; markDrop = false;
       const dist = level.distAt(c.t);
       this.defs.push({
         dist,
@@ -296,9 +392,10 @@ export class Blocks {
         beatType: c.beat,
         voice: c.voice,
         kind: 'note',
-        pattern: patUntil > 0 ? (patKind === 0 ? 'sweep' : 'wall') : undefined,
-        // МЕГА-блок: иногда на сильную долю вне паттерна — крупный акцент
-        wide: patUntil < 0 && c.beat === 'strong' && Math.random() < 0.1,
+        pattern: patUntil > 0 ? patName : undefined,
+        // МЕГА-блок: кульминация дропа ИЛИ редкий случайный акцент на сильную долю
+        wide: isDrop || (patUntil < 0 && c.beat === 'strong' && Math.random() < 0.07),
+        drop: isDrop || undefined,
         collected: false,
         missed: false,
       });
@@ -308,12 +405,20 @@ export class Blocks {
     if (import.meta.env?.DEV) {
       const v: Record<string, number> = { lead: 0, bass: 0, kick: 0, snare: 0 };
       const b: Record<string, number> = { strong: 0, weak: 0, off: 0, solo: 0 };
-      for (const d of this.defs) { v[d.voice]++; b[d.beatType]++; }
+      const p: Record<string, number> = { sweep: 0, wall: 0, zigzag: 0, stairs: 0, pendulum: 0, double: 0 };
+      let drops = 0;
+      for (const d of this.defs) {
+        v[d.voice]++; b[d.beatType]++;
+        if (d.pattern) p[d.pattern]++;
+        if (d.drop) drops++;
+      }
       // eslint-disable-next-line no-console
       console.log(
         `[blocks] ${diff} «${song.title}» ${song.bpm}bpm: ${this.defs.length} блоков · ` +
         `голос[lead ${v.lead} bass ${v.bass} kick ${v.kick} snare ${v.snare}] · ` +
-        `доля[strong ${b.strong} weak ${b.weak} off ${b.off}]`,
+        `доля[strong ${b.strong} weak ${b.weak} off ${b.off}] · ` +
+        `паттерн[волна ${p.sweep} стена ${p.wall} зигзаг ${p.zigzag} лесенка ${p.stairs} ` +
+        `маятник ${p.pendulum} дабл ${p.double}] · дропов ${dropTimes.length} (кульминаций ${drops})`,
       );
     }
 
@@ -345,12 +450,14 @@ export class Blocks {
       }
     }
 
-    // казино-слой: спец-блоки рядом с потоком, в средней части трека
+    // казино-слой: спец-блоки. ЯКОРИМ к дропам — джекпот падает сразу за
+    // кульминацией музыкального пика (resolution reward, дофамин). Дропов нет —
+    // прежняя раскладка по доле трека.
     {
-      const placeSpecial = (kind: 'gold' | 'mystery', frac: number) => {
-        const base = this.defs[Math.floor(this.defs.length * Math.min(0.92, frac))];
+      const dropDefs = this.defs.filter((d) => d.drop);
+      const placeAt = (kind: 'gold' | 'mystery', base: BlockDef | undefined, ahead: number) => {
         if (!base) return;
-        const dist = base.dist + 4;
+        const dist = base.dist + ahead;
         this.defs.push({
           dist,
           lane: base.lane,
@@ -366,12 +473,19 @@ export class Blocks {
           missed: false,
         });
       };
-      // джекпот — неожиданно, где-то в середине
-      if (extras.gold) placeSpecial('gold', 0.35 + Math.random() * 0.4);
-      // мистери — равномерно по треку, со случайным сдвигом
-      for (let m = 0; m < extras.mystery; m++)
-        placeSpecial('mystery', (0.2 + 0.6 * (m / Math.max(1, extras.mystery - 1) || 0))
+      const placeFrac = (kind: 'gold' | 'mystery', frac: number) =>
+        placeAt(kind, this.defs[Math.floor(this.defs.length * Math.min(0.92, frac))], 4);
+      // джекпот — сразу за случайным дропом (там пик), иначе где-то в середине
+      if (extras.gold) {
+        if (dropDefs.length) placeAt('gold', dropDefs[Math.floor(Math.random() * dropDefs.length)], 6);
+        else placeFrac('gold', 0.35 + Math.random() * 0.4);
+      }
+      // мистери — по дропам (разносим), иначе равномерно по треку
+      for (let m = 0; m < extras.mystery; m++) {
+        if (dropDefs.length) placeAt('mystery', dropDefs[m % dropDefs.length], 5 + (m % 2) * 3);
+        else placeFrac('mystery', (0.2 + 0.6 * (m / Math.max(1, extras.mystery - 1) || 0))
           + Math.random() * 0.12);
+      }
       this.defs.sort((a, b) => a.dist - b.dist);
     }
 
@@ -483,17 +597,15 @@ export class Blocks {
       // исходные размеры (крупнее, без капа)
       if (b.kind === 'magnet') return 1.15;
       if (b.kind === 'gold' || b.kind === 'mystery') return 1.5;
-      return (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1))
-        * BEAT_SIZE_LEGACY[b.beatType] * (b.pattern ? 1.4 : 1) * (b.wide ? 1.9 : 1);
+      // ОБЫЧНЫЙ размер для всех нот: убраны множители МЕГА/паттерн/аккорд — больше
+      // нет огромных кубов. wide/pattern/count живут в очках/зоне сбора, не в размере.
+      return (0.7 + (b.vel / 127) * 0.6) * BEAT_SIZE_LEGACY[b.beatType];
     }
     if (b.kind === 'magnet') return 1.1;
     if (b.kind === 'gold') return 1.35;
     if (b.kind === 'mystery') return 1.3;
-    return Math.min(SIZE_MAX,
-      (0.62 + (b.vel / 127) * 0.4) * (1 + 0.12 * (b.count - 1))
-      * BEAT_SIZE[b.beatType] // сильная доля крупнее
-      * (b.pattern ? 1.2 : 1) // блоки паттерна крупнее — фигура читается
-      * (b.wide ? 1.45 : 1)); // МЕГА-блок — крупный акцент (в пределах капа)
+    // ОБЫЧНЫЙ размер для всех нот: убраны множители МЕГА/паттерн/аккорд.
+    return Math.min(SIZE_MAX, (0.62 + (b.vel / 127) * 0.4) * BEAT_SIZE[b.beatType]);
   }
 
   /**

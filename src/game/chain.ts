@@ -247,6 +247,12 @@ export class EndlessChain implements Level {
     return s ? s.song.genre : '';
   }
 
+  /** Строй (тоника+лад) трека в момент t — для квантования звука сбора. */
+  keyAt(t: number): { tonic: number; mode: string } | null {
+    const s = this.segAtTime(t);
+    return s ? { tonic: s.song.key.tonic, mode: s.song.key.mode } : null;
+  }
+
   /** Название трека, звучащего в момент t — для подписи на стыке (конкретная композиция). */
   titleAt(t: number): string {
     const s = this.segAtTime(t);

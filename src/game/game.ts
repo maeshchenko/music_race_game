@@ -105,6 +105,11 @@ export class Game {
   private intensity = 0.6;
   private missStreak = 0;
   private missLimit: number;
+  /** «Здоровье» лид-мелодии 0..1: промах включает спад (до нуля за ~1.3с), любой
+   *  сбор мгновенно возвращает полную. Маппится в leadGuide кондуктора. */
+  private leadHealth = 1;
+  private leadFading = false; // идёт затухание (взведено промахом, снято сбором)
+  private engaged = false; // игра «началась» — с первого собранного блока (до него мелодия полная)
   /** Fever-уровни: x15/x30/x50 комбо → множитель ×2/×3/×4. */
   private feverLevel = 0;
   private get fever() { return this.feverLevel > 0; }
@@ -173,6 +178,7 @@ export class Game {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.bpm = song.bpm;
     this.applySfxGenre(song.genre); // тембр сбора под жанр стартового трека
+    this.sfx.setKey(song.key.tonic, song.key.mode); // строй сбора = тональность трека
     this.bestScore = extras.best ?? 0;
     this.endless = !!endlessOpts;
     this.car = buildCar({ color: extras.carColor ?? 0x6b1220 });
@@ -284,7 +290,7 @@ export class Game {
     container.appendChild(this.odBar);
     this.odIcon = document.createElement('div');
     this.odIcon.className = 'od-icon';
-    this.odIcon.textContent = '⚡ ЗАКИСЬ АЗОТА';
+    this.odIcon.textContent = '⚡ УСКОРЕНИЕ';
     container.appendChild(this.odIcon);
     this.odPrompt = document.createElement('div');
     this.odPrompt.className = 'od-prompt';
@@ -364,6 +370,7 @@ export class Game {
   }
 
   private sfxGenre = ''; // последний жанр, отданный в Sfx (анти-дубль)
+  private sfxTonic = -1; private sfxMode = ''; // последний строй, отданный в Sfx
   /** Сменить тембр сбора под жанр, если он из поддерживаемой тройки. */
   private applySfxGenre(g: string) {
     if (g === this.sfxGenre) return;
@@ -546,9 +553,19 @@ export class Game {
     this.maxCombo = Math.max(this.maxCombo, this.combo);
     this.collected++;
     this.trackHit(true);
-    // анонс входа в хореографированный паттерн — чтобы фигура читалась явно
-    if (b.pattern && b.pattern !== this.lastPattern) {
-      this.pop(b.pattern === 'sweep' ? '🌊 ВОЛНА!' : '🧱 СТЕНА!', 'pop-combo pop-super');
+    this.leadHealth = 1; this.leadFading = false; // ЛЮБОЙ сбор мгновенно возвращает мелодию
+    this.engaged = true; // первый сбор = «игра началась» (до него мелодия не трогается)
+    // кульминация дропа — отдельный анонс + событийный всплеск (пик музыки = пик игры)
+    if (b.drop) {
+      this.pop('🔥 ДРОП!', 'pop-combo pop-mega');
+      this.director.spark(0.6);
+    } else if (b.pattern && b.pattern !== this.lastPattern) {
+      // анонс входа в хореографированный паттерн — чтобы фигура читалась явно
+      const PAT_LABEL: Record<NonNullable<BlockDef['pattern']>, string> = {
+        sweep: '🌊 ВОЛНА!', wall: '🧱 СТЕНА!', zigzag: '⚡ ЗИГЗАГ!',
+        stairs: '🪜 ЗАБЕГ!', pendulum: '🌀 РАЗГОН!', double: '👯 ДАБЛ!',
+      };
+      this.pop(PAT_LABEL[b.pattern], 'pop-combo pop-super');
     }
     this.lastPattern = b.pattern;
     // разогрев сессии: каждые 70 блоков — тир вверх (растущий множитель/спектакль)
@@ -633,6 +650,7 @@ export class Game {
   private onMiss() {
     this.perfectStreak = 0; // серия центровых обрывается промахом
     this.trackHit(false);
+    this.leadFading = true; // первый пропуск запускает спад мелодии (до нуля за ~1.3с)
     this.missStreak++;
     if (this.missStreak >= this.missLimit && this.combo > 0) {
       this.missStreak = 0;
@@ -910,9 +928,19 @@ export class Game {
     if (this.endless && this.chain) {
       this.bpm = this.chain.bpmAt(t);
       this.applySfxGenre(this.chain.genreAt(t)); // тембр сбора едет за жанром цепочки
+      const k = this.chain.keyAt(t); // строй сбора едет за тональностью цепочки
+      if (k && (k.tonic !== this.sfxTonic || k.mode !== this.sfxMode)) {
+        this.sfxTonic = k.tonic; this.sfxMode = k.mode;
+        this.sfx.setKey(k.tonic, k.mode);
+      }
       // лид-гид по комбо: играешь чисто (комбо растёт) → трек-лид уходит в тень,
       // мелодию несёт твой сбор; сорвал — гид возвращается и ведёт. Адаптивный микс.
-      this.conductor?.setLeadGuide(0.6 - Math.min(this.combo, 30) / 30 * 0.34); // 0.6→0.26
+      // лид-мелодия гаснет, пока ты пропускаешь: промах взводит спад (до нуля за ~1.3с),
+      // любой сбор мгновенно снимает спад и возвращает полную → guide 0.12…1.0.
+      // До ПЕРВОГО собранного блока мелодия полная (едешь к блоку — ничего не гаснет).
+      if (!this.engaged) { this.leadHealth = 1; this.leadFading = false; }
+      else if (this.leadFading) this.leadHealth = Math.max(0, this.leadHealth - dt / 1.3);
+      this.conductor?.setLeadGuide(0.12 + this.leadHealth * 0.88);
     }
     const beatEnv = Math.max(0, 1 - ((t * this.bpm / 60) % 1) * 3.2);
 
@@ -1205,7 +1233,7 @@ export class Game {
       this.odIcon.classList.toggle('on', od || this.energy > 0.02);
       this.odIcon.classList.toggle('hot', ready || od);
       // «(ЛКМ)» — только когда бак полон (тратить можно лишь с полного)
-      this.odIcon.textContent = (ready && !IS_MOBILE) ? '⚡ ЗАКИСЬ АЗОТА (ЛКМ)' : '⚡ ЗАКИСЬ АЗОТА';
+      this.odIcon.textContent = (ready && !IS_MOBILE) ? '⚡ УСКОРЕНИЕ (ЛКМ)' : '⚡ УСКОРЕНИЕ';
       // подсказку готовности не показываем (бесит) — только «ТУРБО!» при активе
       this.odPrompt.classList.toggle('on', od);
       if (od) this.odPrompt.textContent = '⚡ ТУРБО!';

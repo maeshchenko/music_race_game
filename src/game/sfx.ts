@@ -22,6 +22,24 @@ interface SfxPreset {
   cutoff: number; // lowpass — палитра яркости
   wet: number;    // доля реверба — «в миксе»
 }
+/**
+ * Интервалы лада (полутоны от тоники) — чтобы КВАНТОВАТЬ питч сбора в строй
+ * трека. Корень «расстроенного пианино»: перк-слоты (kick/snare) дефолтят
+ * pitch=60 (C), и «искра» звенела C НЕЗАВИСИМО от тональности → фальшь, если
+ * трек не в C. Снап в лад делает любой сбор созвучным музыке.
+ */
+const MODE_INTERVALS: Record<string, number[]> = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  naturalMinor: [0, 2, 3, 5, 7, 8, 10],
+  harmonicMinor: [0, 2, 3, 5, 7, 8, 11],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  blues: [0, 3, 5, 6, 7, 10],
+  minorPentatonic: [0, 3, 5, 7, 10],
+  majorPentatonic: [0, 2, 4, 7, 9],
+};
+
 const PRESETS: Record<Genre, SfxPreset> = {
   // мрачный индастриал: тёмная пила, глухой фильтр, больше пространства
   grimerun: { osc: 'sawtooth', attack: 0.004, decay: 0.14, cutoff: 2400, wet: 0.22 },
@@ -47,6 +65,8 @@ export class Sfx {
   private filter: Tone.Filter;
   private verb: Tone.Reverb;
   private genre: Genre = 'outrun';
+  // строй текущего трека: разрешённые классы высоты (пусто → снап выключен)
+  private scalePcs = new Set<number>();
 
   /**
    * Низколатентное время сбора. Контекст игры — latencyHint:'playback' (большой
@@ -131,6 +151,24 @@ export class Sfx {
     this.verb.wet.rampTo(p.wet, 0.3);
   }
 
+  /** Задать строй трека (тоника + лад) — снап питчей сбора в тональность. */
+  setKey(tonic: number, mode: string) {
+    const iv = MODE_INTERVALS[mode];
+    this.scalePcs = new Set(iv ? iv.map((i) => (((tonic % 12) + i) % 12 + 12) % 12) : []);
+  }
+
+  /** Ближайший класс высоты в ладу (или сам midi, если строй не задан). */
+  private snap(midi: number): number {
+    if (this.scalePcs.size === 0) return midi;
+    const pc = ((Math.round(midi) % 12) + 12) % 12;
+    if (this.scalePcs.has(pc)) return midi;
+    for (let d = 1; d <= 6; d++) {
+      if (this.scalePcs.has((pc + d) % 12)) return midi + d;
+      if (this.scalePcs.has((pc - d + 12) % 12)) return midi - d;
+    }
+    return midi;
+  }
+
   /** Один тональный «дзынь» из пула (round-robin), velocity 0..1. */
   private tone(midi: number, vel: number) {
     const s = this.pool[this.next++ % this.pool.length];
@@ -164,12 +202,14 @@ export class Sfx {
     if (now - this.lastAt < 38) return; // ~26/с
     this.lastAt = now;
     const bright = Math.min(1, 0.55 + Math.min(combo, 40) * 0.011) * (fever ? 1 : 0.92);
-    const clamp = (lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(pitch)));
+    // КВАНТ В СТРОЙ: перк-слоты дефолтят pitch=60 — снап убирает фальшь не-в-ключе
+    const p = this.snap(Math.round(pitch));
+    const clamp = (lo: number, hi: number) => Math.max(lo, Math.min(hi, p));
     // ДУБЛЬ реального события: слышишь, что «сыграл» именно эту ноту трека
     if (voice === 'lead') {
       const m = clamp(60, 96);
       this.tone(m, bright);
-      if (count >= 2) this.tone(m + 7, bright * 0.7); // аккорд
+      if (count >= 2) this.tone(this.snap(m + 7), bright * 0.7); // аккорд (квинта в ладу)
       if (count >= 3) this.tone(m + 12, bright * 0.6);
     } else if (voice === 'bass') {
       const m = clamp(28, 52);
@@ -178,7 +218,7 @@ export class Sfx {
     // ИСКРА-награда = тот же КЛАСС высоты, что у собранной ноты, поднятый в
     // звонкую октаву (PERFECT — ещё октавой выше). Всегда в тональности трека →
     // ДОПОЛНЯЕТ песню, а не живёт своей жизнью. Рост-награда — через яркость.
-    let s = Math.round(pitch);
+    let s = p;
     while (s < 67) s += 12; // в звонкий регистр, сохраняя класс высоты (в ключе)
     // искру притушили: ниже потолок (96 вместо 103) + тише → меньше «писка»
     // поверх музыки; lowpass тон-баса снимает резкие верха.
