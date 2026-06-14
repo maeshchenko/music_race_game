@@ -16,6 +16,7 @@ import { makeGate } from './gate';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
 import { Sfx } from './sfx';
+import { IntensityDirector } from './intensity';
 import type { Level } from './level';
 import { EndlessChain } from './chain';
 import type { Conductor } from '../conductor';
@@ -114,6 +115,8 @@ export class Game {
   private shielded = false; // щит: следующая авария без штрафа
   private hitStop = 0; // сек заморозки мира — продаёт вес удара
   private bloomPass: UnrealBloomPass | null = null;
+  // #A дирижёр интенсивности: серый ночной базис ↔ редкие пики (см. intensity.ts)
+  private director = new IntensityDirector();
   private bpm: number;
   private bestScore: number; // глобальный рекорд — призрак-цель в HUD
   private recordBroken = false;
@@ -567,8 +570,10 @@ export class Game {
     const milestone = this.popFx();
     // искры — на каждый блок; PERFECT добавляет золотую вспышку искр
     // #40 directional: обломки летят НА камеру (vzBias +6) — «снёс блок собой»
+    // #A плотность искр масштабируем arousal'ом — спектакль как акцент, не фон
     this.particles.burst(b.x, b.y, wz, golden ? C_GOLD_SPARK : VOICE_COLORS[b.voice],
-      (12 + b.count * 6 + Math.min(this.sessionHeat, 20) * 2) * (b.wide ? 2 : 1), 6);
+      (12 + b.count * 6) * (b.wide ? 2 : 1) * this.director.sparkScale(), 6);
+    if (golden) this.director.spark(0.5); // золотой блок — событийный всплеск
     if (b.wide) this.shake = Math.min(0.5, this.shake + 0.12); // МЕГА — ощутимый удар
     if (perfect) {
       this.particles.burst(b.x, b.y + 0.3, wz, C_PERFECT, 8);
@@ -577,6 +582,7 @@ export class Game {
     if (milestone) {
       this.flash(VOICE_CSS[b.voice]);
       this.shake = Math.min(0.45, this.shake + 0.3);
+      this.director.spark(0.3); // веха комбо — заметный всплеск
       this.haptic(12);
     } else if (b.count > 1) {
       this.shake = Math.min(0.45, this.shake + 0.04 * b.count);
@@ -609,6 +615,7 @@ export class Game {
     this.pop(`🔥 РАЗОГРЕВ ×${(1 + Math.min(this.sessionHeat, 30) * 0.05).toFixed(2)}`, 'pop-combo pop-mega');
     this.flash('#ff8a3c');
     this.shake = Math.max(this.shake, 0.4);
+    this.director.spark(0.5); // тир разогрева — крупный всплеск
   }
 
   /** Промах нот-блока: прощающее комбо — одиночный промах тихий. */
@@ -845,6 +852,7 @@ export class Game {
       this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
       this.flash('#ffd24d');
       this.shake = Math.min(0.6, this.shake + 0.4);
+      this.director.spark(0.7); // турбо — сильнейший всплеск
       this.haptic([20, 30, 50]);
     }
     if (this.nosActive) {
@@ -867,6 +875,7 @@ export class Game {
       this.nextGolden = t + 22 + Math.random() * 30;
       this.pop('🌟 ЗОЛОТАЯ ВОЛНА! ×2.5', 'pop-combo pop-mega');
       this.flash('#ffd24d');
+      this.director.spark(0.6); // старт золотой волны — крупный всплеск
     }
 
     // #36/#35 новизна против скуки: каждые ~35–55с — смена темы/погоды (новая
@@ -952,10 +961,11 @@ export class Game {
     this.car.rotation.y = -Math.atan(roadDir) + THREE.MathUtils.clamp(-vx * 0.035, -0.4, 0.4);
     this.car.rotation.z = THREE.MathUtils.clamp(vx * 0.014, -0.14, 0.14);
 
-    // микро-тряска от сбора, быстро гаснет
+    // микро-тряска от сбора, быстро гаснет; сила/вкл — канал cameraShake дирижёра
     this.shake *= Math.exp(-7 * dt);
-    const shX = (Math.random() - 0.5) * this.shake * 0.3;
-    const shY = (Math.random() - 0.5) * this.shake * 0.22;
+    const shG = this.director.shakeGain();
+    const shX = (Math.random() - 0.5) * this.shake * 0.3 * shG;
+    const shY = (Math.random() - 0.5) * this.shake * 0.22 * shG;
 
     if (this.finished) {
       // камера остаётся у финишных ворот и провожает машину взглядом
@@ -1005,8 +1015,10 @@ export class Game {
       this.camera.position.z += 0.12 * this.nosVis;
       this.camera.position.y -= 0.08 * this.nosVis; // чуть НИЖЕ обычного (~0.5° вниз)
     }
-    // #15 камера слегка «вдыхает» на долю (zoom-in пульс), + турбо-рывок
-    const fov = 62 + 0.6 * this.nosVis - beatEnv * 0.7;
+    // #15/#A камера «вдыхает» на долю (zoom-пульс) — канал cameraPulse дирижёра,
+    // гейтирован состоянием (в холодном затишье 0 → камера не дёргается «сама»);
+    // турбо-widen (nosVis) — отдельная механика, остаётся.
+    const fov = 62 + 0.6 * this.nosVis - this.director.cameraPulse(beatEnv);
     if (Math.abs(fov - this.camera.fov) > 0.03) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
@@ -1046,7 +1058,7 @@ export class Game {
         const ld = dist - seg.distOffset;
         const lt = t - seg.tOffset;
         seg.blocks.update(
-          ld, carWorldX, lt, dt, this.fever, magnetActive,
+          ld, carWorldX, lt, dt, this.fever, magnetActive, this.director.blockThrob(),
           (b, perfect) => this.onCollect(b, perfect, t, seg.distOffset),
           () => this.onMiss(),
         );
@@ -1057,7 +1069,7 @@ export class Game {
       }
     } else {
       this.blocks.update(
-        dist, carWorldX, t, dt, this.fever, magnetActive,
+        dist, carWorldX, t, dt, this.fever, magnetActive, this.director.blockThrob(),
         (b, perfect) => this.onCollect(b, perfect, t, 0),
         () => this.onMiss(),
       );
@@ -1183,12 +1195,19 @@ export class Game {
       this.turboFx.style.opacity = this.nosVis > 0.02 ? '1' : '0';
       this.turboFx.style.setProperty('--tb', `${(this.nosVis * 7).toFixed(1)}px`);
 
-      // #19/fever: края экрана централизованно (овердрайв > fever > пре-fever)
-      const edge = (od || this.finaleEnv > 0.1) ? 'fever-edge on overdrive' // золото на финале/турбо
-        : this.feverLevel ? `fever-edge on lvl${this.feverLevel}` : 'fever-edge';
-      if (edge !== this.feverEdgeCls) { this.feverEdge.className = edge; this.feverEdgeCls = edge; }
-      this.feverEdge.style.opacity =
-        (!od && this.feverLevel === 0 && this.combo >= 10) ? String(((this.combo - 9) / 6) * 0.5) : '';
+      // #19/fever/#A: края экрана централизованно (овердрайв > fever > пре-fever).
+      // Канал feverEdge дирижёра: gain=0 — выкл; gain масштабирует пре-fever глоу.
+      const eg = this.director.edgeGain();
+      if (eg <= 0) {
+        if (this.feverEdgeCls !== 'fever-edge') { this.feverEdge.className = 'fever-edge'; this.feverEdgeCls = 'fever-edge'; }
+        this.feverEdge.style.opacity = '0';
+      } else {
+        const edge = (od || this.finaleEnv > 0.1) ? 'fever-edge on overdrive' // золото на финале/турбо
+          : this.feverLevel ? `fever-edge on lvl${this.feverLevel}` : 'fever-edge';
+        if (edge !== this.feverEdgeCls) { this.feverEdge.className = edge; this.feverEdgeCls = edge; }
+        this.feverEdge.style.opacity =
+          (!od && this.feverLevel === 0 && this.combo >= 10) ? String(((this.combo - 9) / 6) * 0.5 * eg) : '';
+      }
 
       let recPart = '';
       if (this.bestScore > 0 && !this.finished) {
@@ -1212,21 +1231,24 @@ export class Game {
       if (hud !== this.lastHud) { this.hud.textContent = hud; this.lastHud = hud; }
     }
 
-    // неон дышит в бит: bloom качается с каждым ударом, в fever сильнее.
-    // присваиваем только при заметном изменении — лишние записи в пасс не нужны
-    if (this.bloomPass && !this.paused) {
-      // #41 неон бьётся в бит глубже (0.14→0.22), + турбо + разогрев сессии.
-      // #39 динамика: ярче на пиках секции, мягче в затишье (energyAt 0..1)
-      const energy = this.level.energyAt(t);
-      const s = 0.42 + energy * 0.16 + 0.22 * beatEnv * beatEnv * (1 + this.feverLevel * 0.4)
-        + this.nosVis * 0.55 + Math.min(this.sessionHeat, 16) * 0.02 + this.finaleEnv * 0.9;
+    // #A дирижёр интенсивности: всё освещение картинки тянем через один arousal,
+    // чтобы в затишье оно проседало к серому ночному базису, а пики были редки.
+    // #39 energyAt 0..1 — динамика секции (ярче на пиках музыки, мягче в затишье)
+    const energy = this.level.energyAt(t);
+    if (!this.paused) {
+      this.director.setHeat(this.sessionHeat);
+      this.director.update(dt, beatEnv, this.feverLevel, this.nosVis, energy);
+    }
 
+    // неон дышит в бит через arousal; присваиваем только при заметном изменении
+    if (this.bloomPass && !this.paused) {
+      const s = this.director.bloomStrength(this.finaleEnv);
       if (Math.abs(s - this.bloomPass.strength) > 0.003) this.bloomPass.strength = s;
     }
 
-    // #44 палитра «разогревается» с комбо — ярче экспозиция (видимый рост)
-    if (!this.paused) this.renderer.toneMappingExposure = 1.05 + Math.min(this.combo, 60) * 0.0035;
-    this.world.update(dt, this.car.position, beatEnv); // #16 окна/фонари дышат в бит
+    // #44 палитра «разогревается» на пиках arousal, остывает в затишье
+    if (!this.paused) this.renderer.toneMappingExposure = this.director.exposure();
+    this.world.update(dt, this.car.position, this.director.worldPulse(beatEnv)); // #16/#A пульс мира — канал worldPulse дирижёра
     if (this.composer) this.composer.render();
     else this.renderer.render(this.world.scene, this.camera);
 

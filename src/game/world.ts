@@ -10,6 +10,10 @@ import { IS_MOBILE } from '../platform';
 
 const CHUNK_LEN = 60;
 const CHUNKS = 13; // ~780 м видимой улицы
+// Сеттинг — ПРОВИНЦИЯ 90х. Городские элементы (высотка/ТЦ из kinds + неон-билборды
+// + эстакады/арки) ломают сеттинг → пока СКРЫТЫ. Не удалены, геометрия/материалы
+// целы — вернуть можно одним флагом true (пригодятся для «центра» большого города).
+const SHOW_URBAN = false;
 const LAMP_SPACING = 20;
 const ROAD_W = 9;
 const POOLED_LIGHTS = IS_MOBILE ? 2 : 4;
@@ -449,11 +453,13 @@ export class World {
       lampHeads.push(new THREE.Vector3(hx, h + 5.1, -z));
     }
 
-    // панельки по сторонам
+    // панельки по сторонам. В провинц-режиме отсекаем высотку(4)/ТЦ(5) —
+    // промздание(6) провинциальное, остаётся.
+    const kinds = SHOW_URBAN ? bm.kinds : bm.kinds.filter((k) => k !== 4 && k !== 5);
     for (const s of [-1, 1]) {
       let z = -Math.random() * 14;
       while (z > -CHUNK_LEN) {
-        const kind = this.kinds[bm.kinds[Math.floor(Math.random() * bm.kinds.length)]];
+        const kind = this.kinds[kinds[Math.floor(Math.random() * kinds.length)]];
         const rot = Math.random() < 0.4 ? Math.PI / 2 : 0;
         const w = rot ? kind.d : kind.w, d = rot ? kind.w : kind.d;
         const b = new THREE.Mesh(this.boxGeo, kind.mats);
@@ -495,8 +501,9 @@ export class World {
       }
     }
 
-    // эстакада над дорогой — проезжаешь под мостом (бетон + опоры)
-    if (Math.random() < bm.bridge) {
+    // эстакада/арка над дорогой — проезжаешь под мостом (бетон + опоры).
+    // Скрыта в провинц-режиме (ломает сеттинг 90х), геометрия/материалы целы.
+    if (SHOW_URBAN && Math.random() < bm.bridge) {
       const z = -8 - Math.random() * (CHUNK_LEN - 16);
       const cx = this.cAt(chunkZ + z);
       const h = this.hAt(chunkZ + z);
@@ -530,8 +537,9 @@ export class World {
       }
     }
 
-    // неон-билборд на столбе у дороги, лицом к трассе — кислотный акцент
-    if (Math.random() < bm.billboard) {
+    // неон-билборд на столбе у дороги, лицом к трассе — кислотный акцент.
+    // Скрыт в провинц-режиме (ломает сеттинг 90х), геометрия/материалы целы.
+    if (SHOW_URBAN && Math.random() < bm.billboard) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const z = -Math.random() * CHUNK_LEN;
       const x = s * (ROAD_W / 2 + 5) + this.cAt(chunkZ + z);
@@ -635,8 +643,10 @@ export class World {
     chunk.lampHeads = fresh.lampHeads;
   }
 
-  update(dt: number, carPos: THREE.Vector3, beatEnv = 0) {
-    this.pulse(beatEnv); // #16 окна/фонари дышат в бит
+  update(dt: number, carPos: THREE.Vector3, pulseDepth = 0) {
+    // #16/#A глубину пульса (окна/фонари дышат в бит) считает дирижёр (канал
+    // worldPulse, гейтирован состоянием): в холодном затишье ≈0 → мир НЕПОДВИЖЕН.
+    this.pulse(pulseDepth);
     // переезд чанков
     for (const c of this.chunks) {
       if (-c.index * CHUNK_LEN - CHUNK_LEN > carPos.z + CHUNK_LEN * 1.5)

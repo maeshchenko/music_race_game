@@ -402,7 +402,7 @@ export class Blocks {
    */
   update(
     carDist: number, carWorldX: number, time: number, dt: number, fever: boolean,
-    magnet: boolean,
+    magnet: boolean, throb: number,
     onCollect: (b: BlockDef, perfect: boolean) => void, onMiss: () => void,
   ) {
     // DDA-прорежение: при входе нот-блока в ближнюю зону (~50 м) решаем
@@ -466,8 +466,9 @@ export class Blocks {
       }
     }
 
-    // вращение и пульс ближних видимых
-    const pulseAmp = fever ? 0.16 : 0.07;
+    // вращение и пульс ближних видимых. throb (0..1) — канал blockThrob дирижёра:
+    // в холодном затишье ≈0 → блоки не дышат «сами», только крутятся.
+    const pulseAmp = (fever ? 0.16 : 0.07) * throb;
     let colorDirty = false;
     this.frame++;
     const odd = this.frame & 1;
