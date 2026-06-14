@@ -1,34 +1,60 @@
 import * as THREE from 'three';
 
 /**
- * Текстура линзы задней фары ВАЗ-2107: ночью светится мягким тёплым красным,
- * секции едва читаются (оранжевый поворотник слева, белый задний-ход справа
- * лишь намёком). Размыта — фара в «тумане», не резкая. Идёт в emissiveMap.
+ * Текстура линзы заднего фонаря ВАЗ-2107 — точная раскладка реального блока:
+ *   ВЕРХ — 3 красные ячейки (стоп/габарит), в СРЕДНЕЙ — катафот (отражатель,
+ *          призматическая сетка);
+ *   НИЗ  — 2 ячейки: амбер-поворотник (край) + белый задний-ход (внутрь).
+ * Тёмные перегородки между секциями + вертикальные рёбра линзы. Резко (мин. блюр).
  */
 function taillightTexture(): THREE.CanvasTexture {
-  const W = 64, H = 40;
+  const W = 96, H = 36;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#1a0402'; g.fillRect(0, 0, W, H);
-  g.filter = 'blur(1.4px)'; // размытие линзы — мягкое свечение, не резко
-  // основное тёплое красное тело лампы
-  const body = g.createRadialGradient(32, 17, 2, 32, 20, 33);
-  body.addColorStop(0, '#ff8a4a');
-  body.addColorStop(0.4, '#ff3016');
-  body.addColorStop(0.8, '#c0140a');
-  body.addColorStop(1, '#2c0604');
-  g.fillStyle = body; g.fillRect(0, 0, W, H);
-  // намёк оранжевого (поворотник) слева-внизу
-  const amber = g.createRadialGradient(13, 30, 1, 13, 30, 15);
-  amber.addColorStop(0, 'rgba(255,165,60,0.55)');
-  amber.addColorStop(1, 'rgba(255,165,60,0)');
-  g.fillStyle = amber; g.fillRect(0, 18, 30, 22);
-  // намёк холодного (задний ход) справа-внизу
-  const cool = g.createRadialGradient(52, 30, 1, 52, 30, 14);
-  cool.addColorStop(0, 'rgba(230,235,240,0.4)');
-  cool.addColorStop(1, 'rgba(230,235,240,0)');
-  g.fillStyle = cool; g.fillRect(34, 18, 30, 22);
+  g.fillStyle = '#180402'; g.fillRect(0, 0, W, H);
+  g.filter = 'blur(0.3px)'; // ЧЁТКАЯ линза (сегменты читаются), лишь анти-алиас. Мягкость даёт
+  //                            спрайт-ореол вокруг фонаря (outer glow), а не размытие текстуры.
+  const mid = 19; // граница верх(красные ячейки)/низ(поворотник+задний ход)
+  const inX = 2, inW = W - 4;
+  // ВЕРХ: 3 красные ячейки
+  const cw3 = inW / 3;
+  const redCell = (x: number, w: number) => {
+    const r = g.createLinearGradient(0, 0, 0, mid);
+    r.addColorStop(0, '#d24a26'); r.addColorStop(0.5, '#c01808'); r.addColorStop(1, '#7a0c06');
+    g.fillStyle = r; g.fillRect(x, 2, w, mid - 3);
+  };
+  redCell(inX, cw3);
+  redCell(inX + cw3, cw3);
+  redCell(inX + cw3 * 2, cw3);
+  // КАТАФОТ в средней верхней ячейке: призматическая сетка (читается как отражатель)
+  {
+    const x0 = inX + cw3 + 2, x1 = inX + cw3 * 2 - 2, y0 = 4, y1 = mid - 4;
+    g.fillStyle = '#91411d'; g.fillRect(x0, y0, x1 - x0, y1 - y0); // катафот: приглушён (но виден)
+    g.strokeStyle = 'rgba(90,10,4,0.55)'; g.lineWidth = 1;
+    for (let x = x0; x <= x1; x += 3) { g.beginPath(); g.moveTo(x + 0.5, y0); g.lineTo(x + 0.5, y1); g.stroke(); }
+    for (let y = y0; y <= y1; y += 3) { g.beginPath(); g.moveTo(x0, y + 0.5); g.lineTo(x1, y + 0.5); g.stroke(); }
+  }
+  // НИЗ: 2 ячейки — амбер (край) + белый (задний ход)
+  const cw2 = inW / 2;
+  const amber = g.createLinearGradient(0, mid, 0, H);
+  amber.addColorStop(0, '#b28834'); amber.addColorStop(0.6, '#b2670b'); amber.addColorStop(1, '#552a03'); // приглушён (виден)
+  g.fillStyle = amber; g.fillRect(inX, mid + 1, cw2, H - mid - 3);
+  const cool = g.createLinearGradient(0, mid, 0, H);
+  cool.addColorStop(0, '#abadb2'); cool.addColorStop(0.6, '#8f97a1'); cool.addColorStop(1, '#3f4854'); // приглушён (виден)
+  g.fillStyle = cool; g.fillRect(inX + cw2, mid + 1, cw2, H - mid - 3);
+  // ТЁМНЫЕ ПЕРЕГОРОДКИ (под тем же блюром → мягкие, как в тумане)
+  g.fillStyle = '#100302';
+  g.fillRect(0, mid - 1, W, 2);                  // горизонт-разделитель верх/низ
+  g.fillRect(inX + cw3 - 1, 0, 2, mid);          // верт верх 1
+  g.fillRect(inX + cw3 * 2 - 1, 0, 2, mid);      // верт верх 2
+  g.fillRect(inX + cw2 - 1, mid, 2, H - mid);    // верт низ (амбер|белый)
+  // ВЕРТИКАЛЬНЫЕ РЁБРА ЛИНЗЫ — рифление, читается как стекло
+  g.fillStyle = 'rgba(0,0,0,0.18)';
+  for (let x = 3; x < W; x += 4) g.fillRect(x, 0, 1, H);
+  // тёмная рамка корпуса
+  g.strokeStyle = '#0c0201'; g.lineWidth = 2;
+  g.strokeRect(1, 1, W - 2, H - 2);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -203,10 +229,20 @@ const BUMPER_GEO = new THREE.BoxGeometry(1.72, 0.14, 0.18);
 const GRILLE_GEO = new THREE.BoxGeometry(0.74, 0.2, 0.05);
 const HEADLIGHT_GEO = new THREE.BoxGeometry(0.44, 0.2, 0.05);
 const TAILLIGHT_GEO = new THREE.BoxGeometry(0.44, 0.17, 0.05); // широкий горизонтальный (как у 2107)
+// правый фонарь — ЗЕРКАЛО левого (амбер-поворотник наружу у обоих). Тот же материал
+// (стоп-анимация в Game правит ОДИН материал), отражаем через флип UV.x геометрии.
+const TAILLIGHT_GEO_R = (() => {
+  const geo = TAILLIGHT_GEO.clone();
+  const uv = geo.getAttribute('uv');
+  for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i));
+  uv.needsUpdate = true;
+  return geo;
+})();
 
 /** Общие геометрии машины — кто диспозит машину, должен их пропускать. */
 export const SHARED_CAR_GEOS: Set<THREE.BufferGeometry> = new Set([
-  BODY_GEO, GREENHOUSE_GEO, WHEEL_GEO, BUMPER_GEO, GRILLE_GEO, HEADLIGHT_GEO, TAILLIGHT_GEO,
+  BODY_GEO, GREENHOUSE_GEO, WHEEL_GEO, BUMPER_GEO, GRILLE_GEO, HEADLIGHT_GEO,
+  TAILLIGHT_GEO, TAILLIGHT_GEO_R,
 ]);
 
 /**
@@ -238,15 +274,19 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
     : new THREE.MeshStandardMaterial({ color: 0x8d8c80, roughness: 0.3, metalness: 0.4 });
   const headlightL = headMat(HEAD_TEX_L);
   const headlightR = headMat(HEAD_TEX_R);
-  // задняя фара: общая текстура-линза, материал per-instance (накал тормозов)
-  const taillight = lightsOn
-    ? new THREE.MeshStandardMaterial({
-        map: TAIL_TEX, emissiveMap: TAIL_TEX, emissive: 0xffffff,
-        emissiveIntensity: 0.9, toneMapped: false,
-      })
+  // задняя фара: линза-эмиссив ТОЛЬКО на задней грани (+z, группа 4 BoxGeometry),
+  // торцы/корпус — тёмный пластик. Иначе боковые грани коробки светятся текстурой
+  // → «прозрачное стекло по рёбрам». Линза — per-instance (накал стопов в Game).
+  const tailLens = new THREE.MeshStandardMaterial({
+    map: TAIL_TEX, emissiveMap: TAIL_TEX, emissive: 0xffffff,
+    emissiveIntensity: 0.65, toneMapped: false, // ночь+туман: приглушённый накал
+  });
+  const tailHousing = new THREE.MeshStandardMaterial({ color: 0x140404, roughness: 0.7 });
+  const taillight: THREE.Material | THREE.Material[] = lightsOn
+    ? [tailHousing, tailHousing, tailHousing, tailHousing, tailLens, tailHousing] // 4 = +z грань
     : new THREE.MeshStandardMaterial({ color: 0x4a1015, roughness: 0.4 });
 
-  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+  const add = (geo: THREE.BufferGeometry, mat: THREE.Material | THREE.Material[], x: number, y: number, z: number) => {
     const m = new THREE.Mesh(geo, mat);
     m.position.set(x, y, z);
     car.add(m);
@@ -281,19 +321,20 @@ export function buildCar(opts: { color?: number; lightsOn?: boolean; beam?: bool
     }
   }
   // габариты — широкие у внешних углов кормы, проступают наружу
-  add(TAILLIGHT_GEO, taillight, -0.6, 0.55, 2.07).name = 'taillight';
-  add(TAILLIGHT_GEO, taillight, 0.6, 0.55, 2.07).name = 'taillight';
+  add(TAILLIGHT_GEO, taillight, -0.6, 0.55, 2.07).name = 'taillight'; // левый: амбер наружу (−x)
+  add(TAILLIGHT_GEO_R, taillight, 0.6, 0.55, 2.07).name = 'taillight'; // правый: зеркало → амбер наружу (+x)
   // мягкий ореол свечения — фара «в тумане», аддитивно, ловится bloom.
-  // depthTest:false — бампер на поворотах не протыкает ореол
+  // depthTest: у ИГРОКА (beam) false — бампер на поворотах не протыкает ореол;
+  // у ТРАФИКА true — иначе задний ореол просвечивает сквозь кузов встречных.
   if (lightsOn) {
     for (const sx of [-0.6, 0.6]) {
       const spr = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: TAIL_GLOW_TEX, color: 0xff4424, transparent: true, opacity: 0.34,
-        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+        map: TAIL_GLOW_TEX, color: 0xff5230, transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !beam,
         toneMapped: false,
       }));
       spr.position.set(sx, 0.55, 2.13);
-      spr.scale.set(1.25, 0.62, 1);
+      spr.scale.set(1.3, 0.7, 1); // outer glow вокруг фонаря
       spr.name = 'tailglow';
       car.add(spr);
     }

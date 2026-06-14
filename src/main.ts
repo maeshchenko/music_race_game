@@ -26,7 +26,7 @@ import { loadAssets } from './game/assets';
 import { Conductor } from './conductor';
 import { buildLevel } from './game/level';
 import type { Level } from './game/level';
-import { pickTheme } from './game/world';
+import { pickTheme, THEMES } from './game/world';
 import { GarageView } from './garage-view';
 import type { Difficulty } from './game/blocks';
 import {
@@ -102,6 +102,7 @@ let game: Game | null = null;
 let results: HTMLDivElement | null = null;
 let replayRequested = false; // «ЕЩЁ РАЗ» — не перегенерировать трек
 let nextSong: Song | null = null; // следующий трек: генерится в фоне во время заезда
+let firstEndlessRun = true; // первая трасса сессии: всегда снежная ночь + граймран
 let countdownTimer = 0;
 let conductor: Conductor | null = null; // бесконечный сет: общий транспорт
 // дельты для пер-сегментной награды (ноты/XP начисляются на каждом стыке)
@@ -364,7 +365,10 @@ async function startEndless() {
   showLoader();
   setLoader(10, 'генерируем трассу…');
   await nextPaint();
-  const song = nextSong ?? await newSongAsync(randomGenre());
+  // первая трасса сессии — всегда граймран (ниже тема — снежная ночь)
+  const song = firstEndlessRun
+    ? await newSongAsync('grimerun')
+    : (nextSong ?? await newSongAsync(randomGenre()));
   nextSong = null;
   // казино первого сегмента: lucky-ярлык; дальше цепочка решает сама
   luckyRun = --runsUntilLucky <= 0;
@@ -375,7 +379,8 @@ async function startEndless() {
   player = null;
   segPrevScore = 0;
   segPrevBlocks = 0;
-  const theme = pickTheme();
+  const theme = firstEndlessRun ? THEMES[0] : pickTheme(); // первая — «снежная ночь»
+  firstEndlessRun = false;
   setLoader(40, 'строим мир…');
   await nextPaint();
   game = new Game(app, song, STUB_LEVEL, null, diff, audioOffsetMs / 1000,

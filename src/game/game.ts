@@ -127,6 +127,7 @@ export class Game {
   private recordBroken = false;
   private themeIndex = 0; // клавиша 0 перебирает темы оформления на лету
   private tailMat: THREE.MeshStandardMaterial | null = null;
+  private tailBase = 0.6; // сглаженный накал линзы (мерцание накладывается поверх)
   private tailGlows: THREE.Sprite[] = []; // ореолы свечения фар
   private fpsEMA = 60; // сглаженный FPS для дебаг-лога (НЕ УДАЛЯТЬ — нужен до релиза)
   private logAcc = 0; // аккумулятор для лога раз в секунду
@@ -189,7 +190,9 @@ export class Game {
     if (extras.theme) this.themeIndex = Math.max(0, THEMES.indexOf(extras.theme));
     // кеш материала задней фары (обе фары делят один материал) и glow-ореолов
     const tailMesh = this.car.getObjectByName('taillight') as THREE.Mesh | null;
-    this.tailMat = (tailMesh?.material as THREE.MeshStandardMaterial) ?? null;
+    // линза-эмиссив = задняя грань (+z, индекс 4); материал мог стать массивом
+    const tailM = tailMesh?.material;
+    this.tailMat = (Array.isArray(tailM) ? tailM[4] : tailM) as THREE.MeshStandardMaterial ?? null;
     this.car.traverse((o) => {
       if (o.name === 'tailglow' && o instanceof THREE.Sprite) this.tailGlows.push(o);
     });
@@ -957,14 +960,18 @@ export class Game {
       const decel = Math.max(0, (this.prevSpeed - v) / Math.max(dt, 1e-3));
       this.prevSpeed = v;
       const brake = this.finished ? 1 : Math.min(decel / 3.5, 1); // 0..1
-      const target = 0.8 + brake * 2.8;
-      this.tailMat.emissiveIntensity +=
-        (target - this.tailMat.emissiveIntensity) * Math.min(1, dt * 9);
-      const glow = 0.28 + brake * 0.4;
-      const sc = 1 + brake * 0.45;
+      const target = 0.45 + brake * 1.9; // ночь+туман: габарит приглушён, стоп ярче
+      this.tailBase += (target - this.tailBase) * Math.min(1, dt * 9);
+      // лёгкое мерцание лампы накаливания — сумма негармоничных синусов, ~±3%
+      const flick = 1 + (Math.sin(t * 7.3) * 0.4 + Math.sin(t * 17.1) * 0.35
+        + Math.sin(t * 31.7) * 0.25) * 0.03;
+      this.tailMat.emissiveIntensity = this.tailBase * flick;
+      // ореол ВСЕГДА присутствует (пол 0.55), ярче при стопе. Не гаснет после старта.
+      const glow = (0.55 + brake * 0.3) * flick;
+      const sc = 1 + brake * 0.4;
       for (const s of this.tailGlows) {
         s.material.opacity += (glow - s.material.opacity) * Math.min(1, dt * 9);
-        s.scale.set(1.15 * sc, 0.85 * sc, 1);
+        s.scale.set(1.3 * sc, 0.7 * sc, 1); // outer glow
       }
     }
     let dist: number;

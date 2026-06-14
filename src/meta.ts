@@ -8,6 +8,19 @@
 
 const KEY = 'race2107:meta';
 
+// ОДНОРАЗОВЫЙ вайп старых сейвов у всех игроков: при первом запуске после этой
+// версии стираем все race2107:* ключи (флаг переживает чистку → только один раз).
+// Бамп суффикса (`wiped-v1` → `v2`) запустит вайп повторно для новой версии.
+// Выполняется тут — meta.ts читает localStorage первым (top-level load при импорте).
+try {
+  const WIPE_FLAG = 'race2107:wiped-v1';
+  if (!localStorage.getItem(WIPE_FLAG)) {
+    for (const k of Object.keys(localStorage))
+      if (k.startsWith('race2107:')) localStorage.removeItem(k);
+    localStorage.setItem(WIPE_FLAG, '1');
+  }
+} catch { /* localStorage недоступен — пропускаем */ }
+
 export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 export interface SkinDef {
