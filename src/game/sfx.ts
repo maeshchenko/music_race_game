@@ -69,10 +69,12 @@ export class Sfx {
    * чтобы ползунки были независимы.
    */
   setOffset(db: number) {
-    for (const s of this.pool) s.volume.value = -14 + db;
+    // лид/бас сбора подняты (−10/−12): сбор = мелодия композиции, не эхо поверх.
+    // Лид трека приглушён гидом в conductor → сбор слышен как ведущий голос.
+    for (const s of this.pool) s.volume.value = -10 + db;
     this.thud.volume.value = -20 + db;
     this.kick.volume.value = -8 + db;
-    this.bass.volume.value = -15 + db;
+    this.bass.volume.value = -12 + db;
     this.snare.volume.value = -18 + db;
   }
 
@@ -85,7 +87,7 @@ export class Sfx {
       this.pool.push(new Tone.Synth({
         oscillator: { type: 'sawtooth' },
         envelope: { attack: 0.003, decay: 0.12, sustain: 0, release: 0.06 },
-        volume: -14,
+        volume: -10, // сбор-лид громче: он и есть мелодия (лид трека приглушён гидом)
       }).connect(this.filter));
     this.thud = new Tone.Synth({
       oscillator: { type: 'square' },
@@ -102,7 +104,7 @@ export class Sfx {
     this.bass = new Tone.Synth({
       oscillator: { type: 'sawtooth' },
       envelope: { attack: 0.004, decay: 0.13, sustain: 0, release: 0.05 },
-      volume: -15,
+      volume: -12,
     }).connect(this.filter);
     // снейр-щелчок: короткий белый шум
     this.snare = new Tone.NoiseSynth({

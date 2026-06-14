@@ -247,6 +247,12 @@ export class EndlessChain implements Level {
     return s ? s.song.genre : '';
   }
 
+  /** Название трека, звучащего в момент t — для подписи на стыке (конкретная композиция). */
+  titleAt(t: number): string {
+    const s = this.segAtTime(t);
+    return s ? s.song.title : '';
+  }
+
   /** Энергия секции текущего трека (0..1) — для динамики света (#39). */
   energyAt(t: number): number {
     const s = this.segAtTime(t);

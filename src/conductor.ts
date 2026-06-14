@@ -82,6 +82,13 @@ export class Conductor {
   private latCalls = 0;
   private started = false;
   private stems = new Set<{ parts: Tone.Part[]; autoIds: number[]; ensemble: ReturnType<typeof buildEnsemble> | null }>();
+  // Лид-гид: трек-лид играем приглушённо (×leadGuide по velocity) — мелодию несёт
+  // СБОР блоков («ты играешь музыку»). Игра двигает это по комбо: чисто играешь —
+  // гид уходит в тень, твои перехваты = мелодия; сорвал комбо — гид возвращается
+  // и ведёт. Дакаем ТОЛЬКО лид, остальной микс (барабаны/бас/гармония) полный.
+  private leadGuide = 0.5;
+  /** Уровень лид-гида 0..1: 1 — лид на полную, ~0.3 — тихий гид под сбором. */
+  setLeadGuide(g: number) { this.leadGuide = Math.max(0.15, Math.min(1, g)); }
 
   /** Подвесить трек со сдвигом startOffsetSec по глобальному транспорту. */
   addStem(song: Song, startOffsetSec: number): Stem {
@@ -111,9 +118,15 @@ export class Conductor {
         .then(() => console.warn(`[build] IR ready off=${startOffsetSec.toFixed(1)}`))
         .catch(() => { /* мимо */ });
       rec.ensemble = ensemble;
+      // тот же приоритет ведущего голоса, что у генерации блоков (lead>counter>arp):
+      // именно его дублирует сбор → именно его и дакаем как «гид».
+      const leadIdx = (['lead', 'counter', 'arp'] as Role[])
+        .map((r) => song.tracks.findIndex((t) => t.role === r))
+        .find((idx) => idx >= 0) ?? -1;
       parts = song.tracks.map((track, i) => {
         const voice = ensemble!.voices[i];
         const roleTier = ROLE_TIER[track.role] ?? 0;
+        const isLead = i === leadIdx;
         const events = track.notes.map((n) => ({
           time: toTicks(n.start * secPerTick), // абсолютный тик ноты
           pitch: n.pitch,
@@ -123,7 +136,8 @@ export class Conductor {
         }));
         const part = new Tone.Part((time, ev) => {
           if (roleTier > tier) return; // слой ещё не открыт комбо
-          voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
+          // лид — приглушённым гидом (×leadGuide), мелодию несёт сбор блоков
+          voice.trigger(ev.pitch, time, ev.dur, isLead ? ev.vel * this.leadGuide : ev.vel, ev.slide);
         }, events);
         part.start(0); // времена событий абсолютные (в тиках) → старт с тика 0
         return part;

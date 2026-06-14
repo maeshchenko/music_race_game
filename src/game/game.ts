@@ -716,6 +716,7 @@ export class Game {
     // климакс-ПЕРЕХОД (не «финиш» — едем дальше!): полноэкранная вспышка +
     // тройная ударная волна + хайп-слэм + подпись со след. треком
     const genre = this.chain?.genreAt(t) ?? '';
+    const title = this.chain?.titleAt(t) ?? '';
     const fx = document.createElement('div');
     fx.className = 'finale-fx';
     fx.innerHTML = '<div class="finale-veil"></div><div class="finale-flash"></div>'
@@ -723,7 +724,7 @@ export class Game {
       + '<div class="finale-ring" style="--d:.13s"></div>'
       + '<div class="finale-ring" style="--d:.26s"></div>'
       + '<div class="finale-text">УРОВЕНЬ ПРОЙДЕН</div>'
-      + `<div class="finale-sub">ДАЛЬШЕ${genre ? ': ' + genre.toUpperCase() : ''}</div>`;
+      + `<div class="finale-sub">ДАЛЬШЕ${genre ? ': ' + genre.toUpperCase() : ''}${title ? ': «' + title + '»' : ''}</div>`;
     this.fx.appendChild(fx);
     setTimeout(() => fx.remove(), 1700);
     const { x, y, z } = this.car.position;
@@ -909,6 +910,9 @@ export class Game {
     if (this.endless && this.chain) {
       this.bpm = this.chain.bpmAt(t);
       this.applySfxGenre(this.chain.genreAt(t)); // тембр сбора едет за жанром цепочки
+      // лид-гид по комбо: играешь чисто (комбо растёт) → трек-лид уходит в тень,
+      // мелодию несёт твой сбор; сорвал — гид возвращается и ведёт. Адаптивный микс.
+      this.conductor?.setLeadGuide(0.6 - Math.min(this.combo, 30) / 30 * 0.34); // 0.6→0.26
     }
     const beatEnv = Math.max(0, 1 - ((t * this.bpm / 60) % 1) * 3.2);
 
