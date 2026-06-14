@@ -172,6 +172,7 @@ export class Game {
   ) {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.bpm = song.bpm;
+    this.applySfxGenre(song.genre); // тембр сбора под жанр стартового трека
     this.bestScore = extras.best ?? 0;
     this.endless = !!endlessOpts;
     this.car = buildCar({ color: extras.carColor ?? 0x6b1220 });
@@ -360,6 +361,16 @@ export class Game {
   private haptic(ms: number | number[]) {
     try { (navigator as Navigator & { vibrate?: (p: number | number[]) => boolean }).vibrate?.(ms); }
     catch { /* не поддержано */ }
+  }
+
+  private sfxGenre = ''; // последний жанр, отданный в Sfx (анти-дубль)
+  /** Сменить тембр сбора под жанр, если он из поддерживаемой тройки. */
+  private applySfxGenre(g: string) {
+    if (g === this.sfxGenre) return;
+    if (g === 'grimerun' || g === 'outrun' || g === 'eurobeat') {
+      this.sfxGenre = g;
+      this.sfx.setGenre(g);
+    }
   }
 
   /** Цветная вспышка у машины. */
@@ -895,7 +906,10 @@ export class Game {
 
     // #15/#16/#41 бит-огибающая доли (1 на удар → спад) — единый пульс для
     // камеры, мира (окна/фонари) и блума. Это и есть ритм-транс.
-    if (this.endless && this.chain) this.bpm = this.chain.bpmAt(t);
+    if (this.endless && this.chain) {
+      this.bpm = this.chain.bpmAt(t);
+      this.applySfxGenre(this.chain.genreAt(t)); // тембр сбора едет за жанром цепочки
+    }
     const beatEnv = Math.max(0, 1 - ((t * this.bpm / 60) % 1) * 3.2);
 
     // конец трека → фаза наката: своя интеграция вместо distAt
