@@ -111,8 +111,9 @@ export class EndlessChain implements Level {
     console.warn(`[append] level=${_tLevel.toFixed(1)}ms blocks=${_tBlocks.toFixed(1)}ms `
       + `traffic=${_tTraffic.toFixed(1)}ms total=${(performance.now() - _t0).toFixed(1)}ms`);
     blocks.mesh.position.z = -distOffset; // сдвиг сегмента в мир по дистанции
+    blocks.gates.position.z = -distOffset; // ворота — в той же локальной системе, что меш
     traffic.root.position.z = -distOffset;
-    this.scene.add(blocks.mesh, traffic.root);
+    this.scene.add(blocks.mesh, blocks.gates, traffic.root);
     const seg: Segment = {
       song, level, geoLevel, blocks, traffic, stem: null, stemDone: false, // аудио — JIT в update()
       distOffset, tOffset,
@@ -162,7 +163,7 @@ export class EndlessChain implements Level {
       // снять отъехавшую геометрию (машина далеко впереди)
       if (seg.distEnd < globalDist - RETIRE_BEHIND && seg !== last) {
         seg.retired = true;
-        this.scene.remove(seg.blocks.mesh, seg.traffic.root);
+        this.scene.remove(seg.blocks.mesh, seg.blocks.gates, seg.traffic.root);
         seg.blocks.dispose();
         seg.traffic.dispose();
         seg.stem?.retire();

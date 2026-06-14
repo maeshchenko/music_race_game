@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Song } from 'midi-gen/core';
 import type { Level } from './level';
 import { buildBeatGrid, extractRhythm, classifyTick } from './rhythm';
+import { getArchTemplate, getArchScale, getArchBaseY } from './assets';
 
 /** Сила доли блока: размер + пульс-кик. */
 export type BeatType = 'strong' | 'weak' | 'off' | 'solo';
@@ -54,10 +55,25 @@ export const VOICE_COLORS: Record<Voice, THREE.Color> = {
 export const VOICE_CSS: Record<Voice, string> = {
   lead: '#c14dff', bass: '#3a7bff', kick: '#ff5a3c', snare: '#22ffee',
 };
-/** Множитель размера блока по силе доли — сильная заметно крупнее. */
+/** ВРЕМЕННЫЙ тумблер: true — исходный вид блоков (желейные крутящиеся additive-кубы,
+ *  как было ДО правок); false — призрачные шары + арки-ворота. Ничего не удалено,
+ *  обе ветки живут рядом. */
+const LEGACY = true;
+
+/** Множитель размера блока по силе доли — сильная заметно крупнее (с капом). */
 const BEAT_SIZE: Record<BeatType, number> = {
+  strong: 1.3, weak: 0.92, off: 0.72, solo: 1.0,
+};
+/** Старые множители размера (исходный вид) — крупнее, без капа. */
+const BEAT_SIZE_LEGACY: Record<BeatType, number> = {
   strong: 1.55, weak: 0.95, off: 0.7, solo: 1.05,
 };
+/** Потолок размера блока — чтобы не проваливался под дорогу и не загораживал вид. */
+const SIZE_MAX = 1.7;
+/** Высота центра блока над дорогой (исходно 0.75; новый — нота-хайвей 1.0). */
+const BLOCK_Y = LEGACY ? 0.75 : 1.0;
+/** Длительность поп-анимации сбора (с). */
+const POP_SEC = 0.16;
 /** Приоритеты для склейки/прорежения: тон важнее перкуссии, сильное важнее слабого. */
 const VOICE_RANK: Record<Voice, number> = { lead: 3, bass: 2, snare: 1, kick: 0 };
 const BEAT_RANK: Record<BeatType, number> = { strong: 3, weak: 2, off: 1, solo: 0 };
@@ -90,6 +106,8 @@ export interface BlockDef {
   dropped?: boolean;
   /** Решение о прорежении принято (один раз, при входе в ближнюю зону). */
   decided?: boolean;
+  /** Время музыки в момент сбора — для поп-анимации разлёта. */
+  collectAt?: number;
 }
 
 /** Казино-слой: есть ли в заезде золотой джекпот и сколько мистери-блоков. */
@@ -123,6 +141,11 @@ export class Blocks {
   private colorTmp = new THREE.Color();
   private density = 1; // DDA: 1 — все блоки, <1 — часть прорежена
   private frame = 0; // счётчик кадров — для half-rate анимации дальних блоков
+  private popping: { i: number; t0: number }[] = []; // блоки в поп-анимации сбора
+  // ворота акцентов (МЕГА-ноты) — отдельные статичные меши, проезжаешь насквозь
+  readonly gates = new THREE.Group();
+  private gateOf: (THREE.Object3D | null)[] = []; // index ноты → её ворота (или null)
+  private gatePopping: { mesh: THREE.Object3D; t0: number }[] = [];
 
   /** Невидимая адаптивная сложность: доля оставляемых нот (0.55–1). */
   setDensity(d: number) { this.density = Math.max(0.55, Math.min(1, d)); }
@@ -266,7 +289,7 @@ export class Blocks {
         dist,
         lane,
         x: level.curveAt(dist) + lane * LANE_X,
-        y: level.heightAt(dist) + 0.75,
+        y: level.heightAt(dist) + BLOCK_Y,
         vel: c.vel,
         pitch: Math.round(c.pitch),
         count: Math.min(c.count, 3),
@@ -308,7 +331,7 @@ export class Blocks {
           dist,
           lane: base.lane,
           x: level.curveAt(dist) + base.lane * LANE_X,
-          y: level.heightAt(dist) + 0.85,
+          y: level.heightAt(dist) + BLOCK_Y,
           vel: 100,
           pitch: 60,
           count: 1,
@@ -332,7 +355,7 @@ export class Blocks {
           dist,
           lane: base.lane,
           x: level.curveAt(dist) + base.lane * LANE_X,
-          y: level.heightAt(dist) + 0.9,
+          y: level.heightAt(dist) + BLOCK_Y,
           vel: 127,
           pitch: 60,
           count: 1,
@@ -352,12 +375,46 @@ export class Blocks {
       this.defs.sort((a, b) => a.dist - b.dist);
     }
 
-    const geo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
-    const mat = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: 0.8,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-      toneMapped: false, // мимо ACES — неон остаётся кислотным
-    });
+    let geo: THREE.BufferGeometry;
+    let mat: THREE.Material;
+    if (LEGACY) {
+      // ИСХОДНЫЙ вид: желейный additive-куб, цвет голоса через instanceColor.
+      geo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
+      mat = new THREE.MeshBasicMaterial({
+        transparent: true, opacity: 0.8,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        toneMapped: false,
+      });
+    } else {
+      // Маркер ноты — призрачный неон-ШАР (читается с любого угла). Затенение через
+      // vertex-color от нормали (верх светлее) × instanceColor (голос). toneMapped:false
+      // → неон ловится блумом. Своя копия геометрии на сегмент.
+      geo = new THREE.SphereGeometry(0.5, 16, 12);
+      const norm = geo.getAttribute('normal');
+      const cnt = geo.getAttribute('position').count;
+      const vc = new Float32Array(cnt * 3);
+      for (let k = 0; k < cnt; k++) {
+        const s = 0.7 + 0.3 * Math.max(0, norm.getY(k)); // верхние грани светлее
+        vc[k * 3] = vc[k * 3 + 1] = vc[k * 3 + 2] = s;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(vc, 3));
+      // Освещаемый материал: реагирует на свет фар/фонарей. Собственное неон-свечение
+      // по голосу — emissive = vColor (vertexShade × instanceColor) инъекцией в шейдер;
+      // освещение (фары/лампы) добавляет яркость СВЕРХУ. Призрачная полупрозрачность.
+      const sm = new THREE.MeshStandardMaterial({
+        vertexColors: true, metalness: 0.0, roughness: 1.0, toneMapped: false,
+        transparent: true, opacity: 0.3, depthWrite: true,
+      });
+      // диффуз-отклик СЛАБЫЙ (×0.25) — фары лишь слегка подсвечивают, «свет проходит
+      // сквозь как сквозь туман», не слепят; видимый цвет несёт собственное свечение.
+      sm.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <color_fragment>', '#include <color_fragment>\n\tdiffuseColor.rgb *= 0.25;')
+          .replace('#include <emissivemap_fragment>',
+            '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += vColor.rgb * 0.55;');
+      };
+      mat = sm;
+    }
     this.mesh = new THREE.InstancedMesh(geo, mat, this.defs.length);
     this.mesh.frustumCulled = false;
     this.defs.forEach((b, i) => {
@@ -370,6 +427,30 @@ export class Blocks {
         : b.kind === 'mystery' ? MYSTERY_COLOR
         : VOICE_COLORS[b.voice]); // нота: цвет = голос (инструмент сбора)
     });
+    // МЕГА-ноты → ворота-арки (внешняя модель): прячем их инстанс-самоцвет и
+    // ставим статичную арку, проезжаешь насквозь. Если модель не загрузилась —
+    // остаются обычным (крупным) самоцветом.
+    const archTpl = getArchTemplate();
+    if (archTpl && !LEGACY) {
+      this.defs.forEach((b, i) => {
+        if (!b.wide) return;
+        const gate = archTpl.clone(true);
+        gate.scale.setScalar(getArchScale());
+        gate.position.set(b.x, b.y - BLOCK_Y + getArchBaseY(), -b.dist);
+        const col = VOICE_COLORS[b.voice];
+        gate.traverse((o) => {
+          if (o instanceof THREE.Mesh)
+            o.material = new THREE.MeshBasicMaterial({ color: col, toneMapped: false });
+        });
+        this.gates.add(gate);
+        this.gateOf[i] = gate;
+        // спрятать инстанс-самоцвет этой ноты — рисуем воротами
+        this.dummy.position.set(b.x, b.y, -b.dist);
+        this.dummy.scale.setScalar(0.0001);
+        this.dummy.updateMatrix();
+        this.mesh.setMatrixAt(i, this.dummy.matrix);
+      });
+    }
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
   }
@@ -394,6 +475,25 @@ export class Blocks {
       if (b.dist >= dist - span) lanes.add(b.lane);
     }
     return lanes;
+  }
+
+  /** Базовый размер блока (без пульса), с потолком SIZE_MAX — анти-провал/загораживание. */
+  private sizeOf(b: BlockDef): number {
+    if (LEGACY) {
+      // исходные размеры (крупнее, без капа)
+      if (b.kind === 'magnet') return 1.15;
+      if (b.kind === 'gold' || b.kind === 'mystery') return 1.5;
+      return (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1))
+        * BEAT_SIZE_LEGACY[b.beatType] * (b.pattern ? 1.4 : 1) * (b.wide ? 1.9 : 1);
+    }
+    if (b.kind === 'magnet') return 1.1;
+    if (b.kind === 'gold') return 1.35;
+    if (b.kind === 'mystery') return 1.3;
+    return Math.min(SIZE_MAX,
+      (0.62 + (b.vel / 127) * 0.4) * (1 + 0.12 * (b.count - 1))
+      * BEAT_SIZE[b.beatType] // сильная доля крупнее
+      * (b.pattern ? 1.2 : 1) // блоки паттерна крупнее — фигура читается
+      * (b.wide ? 1.45 : 1)); // МЕГА-блок — крупный акцент (в пределах капа)
   }
 
   /**
@@ -459,10 +559,19 @@ export class Blocks {
         // ось мастерства — всегда видно, что оптимизировать)
         const perfect = Math.abs(b.x - carWorldX) < lat * 0.42;
         onCollect(b, perfect);
-        this.dummy.position.set(b.x, b.y, -b.dist);
-        this.dummy.scale.setScalar(0.0001);
-        this.dummy.updateMatrix();
-        this.mesh.setMatrixAt(i, this.dummy.matrix);
+        if (LEGACY) {
+          // исходное поведение: мгновенно спрятать (уходит под землю)
+          this.dummy.position.set(b.x, b.y, -b.dist);
+          this.dummy.scale.setScalar(0.0001);
+          this.dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this.dummy.matrix);
+        } else {
+          // новый: поп-анимация. МЕГА = ворота (выстрел арки), иначе шар.
+          b.collectAt = time;
+          const gate = this.gateOf[i];
+          if (gate) this.gatePopping.push({ mesh: gate, t0: time });
+          else this.popping.push({ i, t0: time });
+        }
       }
     }
 
@@ -476,37 +585,66 @@ export class Blocks {
       const b = this.defs[i];
       if (b.dist > carDist + 170) break;
       if (b.collected || b.dropped) continue;
+      if (this.gateOf[i]) continue; // МЕГА-нота рисуется воротами, не инстансом
       // дальние (>70 м) обновляем через кадр (≈30 Гц): на таком расстоянии
       // вращение на глаз неотличимо, а матричной работы вдвое меньше. Чётность
       // по индексу — половина дальних обновляется каждый кадр, без мерцания
       if (b.dist > carDist + 70 && ((i ^ odd) & 1)) continue;
       this.dummy.position.set(b.x, b.y, -b.dist);
       if (b.kind === 'magnet') {
-        // бонус крутится заметно быстрее и крупнее
+        // бонус крутится заметно быстрее
         this.dummy.rotation.set(time * 2.2, time * 3.1, 0);
-        this.dummy.scale.setScalar(1.15 + Math.sin(time * 6) * 0.12);
+        this.dummy.scale.setScalar(this.sizeOf(b) + Math.sin(time * 6) * 0.1);
       } else if (b.kind === 'gold') {
-        // джекпот: крупный, бешено крутится, видно издалека
+        // джекпот: бешено крутится, видно издалека
         this.dummy.rotation.set(time * 3, time * 4.2, time * 1.5);
-        this.dummy.scale.setScalar(1.5 + Math.sin(time * 8) * 0.18);
+        this.dummy.scale.setScalar(this.sizeOf(b) + Math.sin(time * 8) * 0.15);
       } else if (b.kind === 'mystery') {
-        // «?»: крупный, дышит и переливается — что внутри, узнаешь на подборе
+        // «?»: дышит и переливается — что внутри, узнаешь на подборе
         this.dummy.rotation.set(time * 1.3, time * 2.5, time * 1.2);
-        this.dummy.scale.setScalar(1.5 + Math.sin(time * 4.5) * 0.25);
+        this.dummy.scale.setScalar(this.sizeOf(b) + Math.sin(time * 4.5) * 0.18);
         this.colorTmp.setHSL((time * 0.9 + i * 0.13) % 1, 0.95, 0.7);
         this.mesh.setColorAt(i, this.colorTmp);
         colorDirty = true;
       } else {
-        this.dummy.rotation.set(0, time * 1.4 + i * 0.7, time * 0.9 + i);
+        // legacy — хаотичный кувырок по 3 осям (как было); новый — спокойный Y-спин
+        if (LEGACY) this.dummy.rotation.set(0, time * 1.4 + i * 0.7, time * 0.9 + i);
+        else this.dummy.rotation.set(0, time * 0.8 + i * 0.5, 0);
         const pulse = 1 + Math.sin(time * 5 + i) * pulseAmp;
-        const size = (0.7 + (b.vel / 127) * 0.6) * (1 + 0.18 * (b.count - 1))
-          * BEAT_SIZE[b.beatType] // сильная доля крупнее
-          * (b.pattern ? 1.4 : 1) // блоки паттерна крупнее — фигура читается явно
-          * (b.wide ? 1.9 : 1); // МЕГА-блок — крупный акцент
-        this.dummy.scale.setScalar(size * pulse);
+        this.dummy.scale.setScalar(this.sizeOf(b) * pulse);
       }
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);
+    }
+
+    // поп-анимация сбора: блок «выстреливает» вверх и схлопывается + закрутка —
+    // осмысленный удар по ноте вместо проваливания под асфальт.
+    for (let p = this.popping.length - 1; p >= 0; p--) {
+      const { i, t0 } = this.popping[p];
+      const b = this.defs[i];
+      const k = (time - t0) / POP_SEC;
+      if (k >= 1) {
+        this.dummy.position.set(b.x, b.y, -b.dist);
+        this.dummy.scale.setScalar(0.0001); // спрятан
+        this.dummy.updateMatrix();
+        this.mesh.setMatrixAt(i, this.dummy.matrix);
+        this.popping.splice(p, 1);
+        continue;
+      }
+      const pop = k < 0.35 ? 1 + (k / 0.35) * 0.5 : 1.5 * Math.max(0, 1 - (k - 0.35) / 0.65);
+      this.dummy.position.set(b.x, b.y + k * 0.6, -b.dist); // лёгкий подброс вверх
+      this.dummy.rotation.set(k * 3, k * 5, k * 2); // закрутка при разлёте
+      this.dummy.scale.setScalar(this.sizeOf(b) * pop);
+      this.dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, this.dummy.matrix);
+    }
+
+    // поп ворот: арка «раскрывается» наружу и исчезает (проехал сквозь — сыграл)
+    for (let p = this.gatePopping.length - 1; p >= 0; p--) {
+      const { mesh, t0 } = this.gatePopping[p];
+      const k = (time - t0) / POP_SEC;
+      if (k >= 1) { mesh.visible = false; this.gatePopping.splice(p, 1); continue; }
+      mesh.scale.setScalar(getArchScale() * (1 + k * 0.4));
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     if (colorDirty && this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
@@ -515,5 +653,9 @@ export class Blocks {
   dispose() {
     this.mesh.geometry.dispose();
     (this.mesh.material as THREE.Material).dispose();
+    // ворота: материалы наши (создали при клоне), геометрия общая с шаблоном — не трогаем
+    this.gates.traverse((o) => {
+      if (o instanceof THREE.Mesh) (o.material as THREE.Material).dispose();
+    });
   }
 }

@@ -22,6 +22,7 @@ import {
   newSong, songDurationSec, formatDuration, createStemPlayer, GENRES, type GameGenre,
 } from './music';
 import { Game } from './game/game';
+import { loadAssets } from './game/assets';
 import { Conductor } from './conductor';
 import { buildLevel } from './game/level';
 import type { Level } from './game/level';
@@ -305,6 +306,7 @@ const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => r()
 // --- игровой цикл ----------------------------------------------------------
 
 async function startRide() {
+  await loadAssets(); // внешние 3D-модели (самоцвет/арка) готовы до создания блоков
   if (ENDLESS) { await startEndless(); return; }
   clearResults();
   showLoader(); // оверлей сразу: вся тяжёлая подготовка прячется за ним

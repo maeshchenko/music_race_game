@@ -204,7 +204,7 @@ export class Game {
       this.posSource = this.player!;
       this.blocks = new Blocks(song, this.level, diff, extras);
       this.traffic = new Traffic(this.level, this.blocks, diff);
-      this.world.scene.add(this.blocks.mesh, this.traffic.root);
+      this.world.scene.add(this.blocks.mesh, this.blocks.gates, this.traffic.root);
       // ворота старта и финиша поперёк дороги
       for (const [label, color, css, d] of [
         ['СТАРТ', 0x22ffee, '#22ffee', this.level.distAt(1.2)],
