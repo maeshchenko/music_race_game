@@ -2,9 +2,14 @@ import * as Tone from 'tone';
 import { generate, type GenreId, type Song } from 'midi-gen/core';
 import { buildEnsemble, type Player } from 'midi-gen/audio';
 
-export type GameGenre = Extract<GenreId, 'grimerun' | 'outrun' | 'eurobeat'>;
+export type GameGenre = Extract<
+  GenreId,
+  'outrun' | 'eurobeat' | 'grimerun' | 'doomerrun' | 'nightcorerun'
+>;
 
-export const GENRES: GameGenre[] = ['grimerun', 'outrun', 'eurobeat'];
+export const GENRES: GameGenre[] = [
+  'outrun', 'eurobeat', 'grimerun', 'doomerrun', 'nightcorerun',
+];
 
 export function newSong(genre: GameGenre): Song {
   // без minutes — естественная форма жанра (~40–65 с);

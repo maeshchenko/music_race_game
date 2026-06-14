@@ -377,7 +377,8 @@ export class Game {
   /** Сменить тембр сбора под жанр, если он из поддерживаемой тройки. */
   private applySfxGenre(g: string) {
     if (g === this.sfxGenre) return;
-    if (g === 'grimerun' || g === 'outrun' || g === 'eurobeat') {
+    if (g === 'grimerun' || g === 'outrun' || g === 'eurobeat'
+        || g === 'doomerrun' || g === 'nightcorerun') {
       this.sfxGenre = g;
       this.sfx.setGenre(g);
     }

@@ -9,7 +9,7 @@ import * as Tone from 'tone';
  * перегружал аудиопоток.
  */
 type Voice = 'lead' | 'bass' | 'kick' | 'snare';
-type Genre = 'grimerun' | 'outrun' | 'eurobeat';
+type Genre = 'grimerun' | 'outrun' | 'eurobeat' | 'doomerrun' | 'nightcorerun';
 
 /**
  * Пресет тембра сбора под жанр трека — чтобы «дзынь» звучал палитрой музыки, а
@@ -47,6 +47,10 @@ const PRESETS: Record<Genre, SfxPreset> = {
   outrun:   { osc: 'sawtooth', attack: 0.003, decay: 0.12, cutoff: 3800, wet: 0.15 },
   // евробит: яркий панч-квадрат, открытый фильтр, суше и резче
   eurobeat: { osc: 'square',   attack: 0.002, decay: 0.10, cutoff: 5400, wet: 0.09 },
+  // думер: меланхоличный, мягкий треугольник, глухой фильтр, много простора
+  doomerrun:    { osc: 'triangle', attack: 0.006, decay: 0.18, cutoff: 1900, wet: 0.30 },
+  // найткор: предельно яркий звон, быстрый квадрат, открытый фильтр, сухо
+  nightcorerun: { osc: 'square',   attack: 0.001, decay: 0.08, cutoff: 6500, wet: 0.07 },
 };
 
 export class Sfx {

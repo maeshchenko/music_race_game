@@ -1,4 +1,4 @@
-declare const GENRE_IDS: readonly ["keygen", "noir", "anime", "phonk", "blues", "military", "darkacademia", "grime", "nightcore", "tune", "musicbox", "eurobeat", "outrun", "grimerun"];
+declare const GENRE_IDS: readonly ["keygen", "noir", "anime", "phonk", "blues", "military", "darkacademia", "grime", "nightcore", "tune", "musicbox", "eurobeat", "outrun", "grimerun", "doomerwave", "doomerrun", "nightcorerun", "test"];
 type GenreId = (typeof GENRE_IDS)[number];
 type Mode = 'major' | 'naturalMinor' | 'harmonicMinor' | 'dorian' | 'phrygian' | 'mixolydian' | 'blues' | 'minorPentatonic' | 'majorPentatonic';
 type TrackRole = 'lead' | 'chords' | 'bass' | 'drums' | 'arp' | 'counter' | 'fx';

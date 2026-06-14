@@ -2,7 +2,7 @@ import {
   GM_DRUMS,
   PPQ,
   getGenre
-} from "./chunk-MT55CDIL.js";
+} from "./chunk-YYIEHPBL.js";
 
 // src/audio/offline.ts
 import * as Tone2 from "tone";
@@ -10,6 +10,11 @@ import * as Tone2 from "tone";
 // src/audio/instruments.ts
 import * as Tone from "tone";
 var midiHz = (pitch) => 440 * 2 ** ((pitch - 69) / 12);
+function makeChorus(depth = 0.7, rate = 0.8) {
+  const ch = new Tone.Chorus(rate, 3.5, depth);
+  ch.wet.value = 0.5;
+  return ch.start();
+}
 function monoGuard(trigger) {
   let last = -1;
   return (p, t, d, v) => {
@@ -129,9 +134,9 @@ function makeBass808(out) {
     filter: { type: "lowpass", Q: 0.5 },
     filterEnvelope: { attack: 5e-3, decay: 0.2, sustain: 1, release: 0.1, baseFrequency: 350, octaves: 0.5 }
   });
-  synth.volume.value = -1;
-  const dist = new Tone.Distortion(0.5);
-  dist.wet.value = 0.35;
+  synth.volume.value = -2;
+  const dist = new Tone.Distortion(0.45);
+  dist.wet.value = 0.33;
   synth.chain(dist, out);
   return {
     trigger: monoGuard((p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v)),
@@ -376,6 +381,168 @@ function makeSupersawLead(out, bpm) {
     }
   };
 }
+function makeColdLead(out, bpm) {
+  const synth = new Tone.MonoSynth({
+    oscillator: { type: "square" },
+    portamento: 0.06,
+    // 60ms glide between notes — the spec's 40–80ms
+    envelope: { attack: 0.015, decay: 0.2, sustain: 0.7, release: 0.35 },
+    filter: { type: "lowpass", Q: 1.5 },
+    filterEnvelope: { attack: 0.02, decay: 0.2, sustain: 0.6, release: 0.3, baseFrequency: 700, octaves: 2 }
+  });
+  synth.volume.value = -10;
+  const chorus = makeChorus(0.8, 0.7);
+  const delay = new Tone.FeedbackDelay(60 / bpm * 0.75, 0.28);
+  delay.wet.value = 0.24;
+  synth.chain(chorus, delay, out);
+  return {
+    trigger: monoGuard((p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v)),
+    dispose: () => {
+      synth.dispose();
+      chorus.dispose();
+      delay.dispose();
+    }
+  };
+}
+function makePostPunkBass(out) {
+  const synth = new Tone.MonoSynth({
+    oscillator: { type: "sawtooth" },
+    envelope: { attack: 6e-3, decay: 0.18, sustain: 0.6, release: 0.12 },
+    filter: { type: "lowpass", Q: 2.5 },
+    filterEnvelope: { attack: 5e-3, decay: 0.12, sustain: 0.55, release: 0.1, baseFrequency: 500, octaves: 2.6 }
+  });
+  synth.volume.value = -5;
+  const clang = new Tone.Distortion(0.18);
+  clang.wet.value = 0.3;
+  const chorus = makeChorus(0.6, 0.6);
+  synth.chain(clang, chorus, out);
+  return {
+    trigger: monoGuard((p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v)),
+    dispose: () => {
+      synth.dispose();
+      clang.dispose();
+      chorus.dispose();
+    }
+  };
+}
+function makeColdPad(out) {
+  const synth = new Tone.PolySynth(Tone.Synth, {
+    oscillator: { type: "fatsawtooth", count: 2, spread: 18 },
+    envelope: { attack: 0.45, decay: 0.5, sustain: 0.75, release: 1.6 }
+  });
+  synth.volume.value = -19;
+  const filter = new Tone.Filter(1500, "lowpass");
+  const chorus = makeChorus(0.9, 0.8);
+  synth.chain(filter, chorus, out);
+  return {
+    trigger: (p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v),
+    dispose: () => {
+      synth.dispose();
+      filter.dispose();
+      chorus.dispose();
+    }
+  };
+}
+function makeCleanGuitar(out) {
+  const synth = new Tone.PolySynth(Tone.Synth, {
+    oscillator: { type: "triangle" },
+    envelope: { attack: 4e-3, decay: 0.4, sustain: 0.2, release: 0.4 }
+  });
+  synth.volume.value = -15;
+  const hp = new Tone.Filter(200, "highpass");
+  const lp = new Tone.Filter(3600, "lowpass");
+  const chorus = makeChorus(0.7, 1);
+  const verb = new Tone.Reverb({ decay: 1.8, wet: 0.26 });
+  synth.chain(hp, lp, chorus, verb, out);
+  return {
+    trigger: (p, t, d, v) => synth.triggerAttackRelease(midiHz(p), Math.max(0.12, d), t, v),
+    ready: verb.ready,
+    dispose: () => {
+      synth.dispose();
+      hp.dispose();
+      lp.dispose();
+      chorus.dispose();
+      verb.dispose();
+    }
+  };
+}
+function makePowerGuitar(out) {
+  const synth = new Tone.PolySynth(Tone.Synth, {
+    oscillator: { type: "fatsawtooth", count: 2, spread: 22 },
+    envelope: { attack: 5e-3, decay: 0.3, sustain: 0.55, release: 0.18 }
+  });
+  synth.volume.value = -11;
+  const distL = new Tone.Distortion(0.6);
+  distL.wet.value = 0.9;
+  const distR = new Tone.Distortion(0.64);
+  distR.wet.value = 0.9;
+  const panL = new Tone.Panner(-0.92);
+  const panR = new Tone.Panner(0.92);
+  const haas = new Tone.FeedbackDelay(0.013, 0);
+  haas.wet.value = 1;
+  synth.connect(distL);
+  distL.connect(panL);
+  panL.connect(out);
+  synth.connect(haas);
+  haas.connect(distR);
+  distR.connect(panR);
+  panR.connect(out);
+  return {
+    trigger: (p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v),
+    dispose: () => {
+      synth.dispose();
+      distL.dispose();
+      distR.dispose();
+      panL.dispose();
+      panR.dispose();
+      haas.dispose();
+    }
+  };
+}
+function makeMetalBass(out) {
+  const synth = new Tone.MonoSynth({
+    oscillator: { type: "sawtooth" },
+    envelope: { attack: 4e-3, decay: 0.16, sustain: 0.7, release: 0.1 },
+    filter: { type: "lowpass", Q: 2.5 },
+    filterEnvelope: { attack: 3e-3, decay: 0.1, sustain: 0.6, release: 0.1, baseFrequency: 600, octaves: 2.8 }
+  });
+  synth.volume.value = -4;
+  const drive = new Tone.Distortion(0.3);
+  drive.wet.value = 0.4;
+  synth.chain(drive, out);
+  return {
+    trigger: monoGuard((p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v)),
+    dispose: () => {
+      synth.dispose();
+      drive.dispose();
+    }
+  };
+}
+function makeSymphonicLead(out, bpm) {
+  const synth = new Tone.MonoSynth({
+    oscillator: { type: "fatsawtooth", count: 3, spread: 30 },
+    portamento: 0.05,
+    envelope: { attack: 0.02, decay: 0.2, sustain: 0.8, release: 0.4 },
+    filter: { type: "lowpass", Q: 1 },
+    filterEnvelope: { attack: 0.02, decay: 0.3, sustain: 0.8, release: 0.4, baseFrequency: 1200, octaves: 2.2 }
+  });
+  synth.volume.value = -9;
+  const vibrato = new Tone.Vibrato(5, 0.07);
+  const delay = new Tone.FeedbackDelay(60 / bpm / 2, 0.25);
+  delay.wet.value = 0.2;
+  const hall = new Tone.Reverb({ decay: 2.6, wet: 0.34 });
+  synth.chain(vibrato, delay, hall, out);
+  return {
+    trigger: monoGuard((p, t, d, v) => synth.triggerAttackRelease(midiHz(p), d, t, v)),
+    ready: hall.ready,
+    dispose: () => {
+      synth.dispose();
+      vibrato.dispose();
+      delay.dispose();
+      hall.dispose();
+    }
+  };
+}
 function makeGenericPoly(out) {
   const synth = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: "triangle" },
@@ -394,45 +561,49 @@ function makeDrumKit(out, opts = {}) {
       pitchDecay: 0.015,
       octaves: 1.5,
       envelope: { attack: 0.01, decay: 0.3, sustain: 0.01, release: 0.3 }
+    } : opts.softKick ? {
+      // Short pitch sweep + a few ms of amp attack — punchy body, no beater click.
+      pitchDecay: 0.025,
+      octaves: 2.5,
+      envelope: { attack: 6e-3, decay: 0.32, sustain: 0.01, release: 0.35 }
     } : {
-      pitchDecay: 0.04,
-      octaves: 6,
-      envelope: { attack: 1e-3, decay: 0.35, sustain: 0.01, release: 0.4 }
+      // octaves 6→3.5 + attack 1ms→3ms: keeps the punch, kills the harsh
+      // beater click and the huge sub-transient that slammed the limiter.
+      pitchDecay: 0.03,
+      octaves: 3.5,
+      envelope: { attack: 3e-3, decay: 0.35, sustain: 0.01, release: 0.4 }
     }
   );
-  kick.volume.value = opts.dullKick ? -8 : -2;
-  const kickFilter = opts.dullKick ? new Tone.Filter(180, "lowpass") : null;
+  kick.volume.value = opts.dullKick ? -8 : opts.softKick ? -4 : -2;
+  const kickFilter = opts.dullKick ? new Tone.Filter(180, "lowpass") : opts.softKick ? new Tone.Filter(320, "lowpass") : null;
   const snare = new Tone.NoiseSynth({
     noise: { type: "white" },
     envelope: { attack: 1e-3, decay: 0.16, sustain: 0 }
   });
   snare.volume.value = -8;
   const snareBody = new Tone.Filter(1800, "bandpass");
-  snare.chain(snareBody, out);
-  const hat = new Tone.MetalSynth({
-    envelope: { attack: 1e-3, decay: 0.045, release: 0.02 },
-    harmonicity: 5.1,
-    modulationIndex: 32,
-    resonance: 4e3,
-    octaves: 1.5
+  const gateVerb = opts.gatedSnare ? new Tone.Reverb({ decay: 0.32, wet: 0.5 }) : null;
+  if (gateVerb) snare.chain(snareBody, gateVerb, out);
+  else snare.chain(snareBody, out);
+  const hatTone = new Tone.Filter(7800, "highpass");
+  const hatTop = new Tone.Filter(13e3, "lowpass");
+  const hat = new Tone.NoiseSynth({
+    noise: { type: "white" },
+    envelope: { attack: 1e-3, decay: 0.035, sustain: 0, release: 0.015 }
   });
-  hat.volume.value = -18;
-  const hatOpen = new Tone.MetalSynth({
-    envelope: { attack: 1e-3, decay: 0.25, release: 0.1 },
-    harmonicity: 5.1,
-    modulationIndex: 32,
-    resonance: 4e3,
-    octaves: 1.5
+  hat.volume.value = -14;
+  const hatOpen = new Tone.NoiseSynth({
+    noise: { type: "white" },
+    envelope: { attack: 1e-3, decay: 0.22, sustain: 0, release: 0.08 }
   });
-  hatOpen.volume.value = -20;
-  const crash = new Tone.MetalSynth({
-    envelope: { attack: 1e-3, decay: 1.2, release: 0.6 },
-    harmonicity: 5,
-    modulationIndex: 40,
-    resonance: 5e3,
-    octaves: 1.8
+  hatOpen.volume.value = -17;
+  const crash = new Tone.NoiseSynth({
+    noise: { type: "white" },
+    envelope: { attack: 1e-3, decay: 1.1, sustain: 0, release: 0.6 }
   });
-  crash.volume.value = -16;
+  crash.volume.value = -13;
+  const crashHp = new Tone.Filter(4500, "highpass");
+  crash.chain(crashHp, out);
   const tom = new Tone.MembraneSynth({
     pitchDecay: 0.06,
     octaves: 3,
@@ -456,25 +627,26 @@ function makeDrumKit(out, opts = {}) {
   const tambourine = new Tone.MetalSynth({
     envelope: { attack: 1e-3, decay: 0.12, release: 0.05 },
     harmonicity: 7,
-    modulationIndex: 28,
+    modulationIndex: 10,
+    // tamed so the FM doesn't explode into limiter crackle
     resonance: 5500,
     octaves: 1.4
   });
-  tambourine.volume.value = -16;
+  tambourine.volume.value = -19;
   const ride = new Tone.MetalSynth({
     envelope: { attack: 2e-3, decay: 0.8, release: 0.4 },
     harmonicity: 4.1,
-    modulationIndex: 20,
+    modulationIndex: 10,
     resonance: 2400,
     octaves: 1.2
   });
-  ride.volume.value = -22;
+  ride.volume.value = -25;
   const hatOut = opts.hatBus ?? out;
   if (kickFilter) kick.chain(kickFilter, out);
   else kick.connect(out);
-  hat.connect(hatOut);
-  hatOpen.connect(hatOut);
-  crash.connect(out);
+  hatTone.chain(hatTop, hatOut);
+  hat.connect(hatTone);
+  hatOpen.connect(hatTone);
   tom.connect(out);
   ride.connect(out);
   tambourine.connect(hatOut);
@@ -483,15 +655,16 @@ function makeDrumKit(out, opts = {}) {
     opts.onKick?.(t);
   });
   const gSnare = monoGuard((_p, t, d, v) => snare.triggerAttackRelease(d, t, v));
-  const gHat = monoGuard((p, t, _d, v) => hat.triggerAttackRelease(midiHz(p), 0.05, t, v));
-  const gHatOpen = monoGuard((p, t, _d, v) => hatOpen.triggerAttackRelease(midiHz(p), 0.3, t, v));
-  const gCrash = monoGuard((p, t, _d, v) => crash.triggerAttackRelease(midiHz(p), 1.4, t, v * 0.8));
+  const gHat = monoGuard((_p, t, _d, v) => hat.triggerAttackRelease(0.04, t, v));
+  const gHatOpen = monoGuard((_p, t, _d, v) => hatOpen.triggerAttackRelease(0.25, t, v));
+  const gCrash = monoGuard((_p, t, _d, v) => crash.triggerAttackRelease(1.1, t, v * 0.8));
   const gTom = monoGuard((p, t, d, v) => tom.triggerAttackRelease(midiHz(p), d, t, v));
   const gRide = monoGuard((p, t, _d, v) => ride.triggerAttackRelease(midiHz(p), 0.7, t, v));
   const gTamb = monoGuard((p, t, _d, v) => tambourine.triggerAttackRelease(midiHz(p), 0.15, t, v));
   const gClap = monoGuard((_p, t, d, v) => clap.triggerAttackRelease(d, t, v));
   const gShaker = monoGuard((_p, t, d, v) => shaker.triggerAttackRelease(d, t, v));
   return {
+    ready: gateVerb?.ready,
     trigger: (pitch, t, d, v) => {
       switch (pitch) {
         case GM_DRUMS.kick:
@@ -539,9 +712,13 @@ function makeDrumKit(out, opts = {}) {
       kickFilter?.dispose();
       snare.dispose();
       snareBody.dispose();
+      gateVerb?.dispose();
       hat.dispose();
+      hatTone.dispose();
+      hatTop.dispose();
       hatOpen.dispose();
       crash.dispose();
+      crashHp.dispose();
       tom.dispose();
       ride.dispose();
       tambourine.dispose();
@@ -561,6 +738,16 @@ function voiceForTrack(track, bpm, out) {
       return makeSawArp(out);
     case 38:
       return makeSynthBass(out);
+    case 33:
+      return makePostPunkBass(out);
+    case 27:
+      return makeCleanGuitar(out);
+    case 30:
+      return makePowerGuitar(out);
+    case 34:
+      return makeMetalBass(out);
+    case 49:
+      return makeSymphonicLead(out, bpm);
     case 113:
       return makeCowbellLead(out);
     case 39:
@@ -596,6 +783,10 @@ function voiceForTrack(track, bpm, out) {
       return makeHarpsichord(out);
     case 90:
       return makeSupersawLead(out, bpm);
+    case 88:
+      return makeColdLead(out, bpm);
+    case 91:
+      return makeColdPad(out);
     default:
       return makeGenericPoly(out);
   }
@@ -634,6 +825,17 @@ function masterFx(genre) {
     case "musicbox":
       return [new Tone.Reverb({ decay: 2.2, wet: 0.28 }), new Tone.Filter(250, "highpass")];
     // tiny box in a quiet room
+    case "nightcorerun": {
+      const glue = new Tone.Distortion(0.06);
+      glue.wet.value = 0.35;
+      return [glue];
+    }
+    case "doomerwave":
+    case "doomerrun": {
+      const wow = new Tone.Vibrato(0.6, 0.012);
+      const chamber = new Tone.Reverb({ decay: 2, wet: 0.2 });
+      return [wow, chamber, new Tone.Filter(11e3, "lowpass")];
+    }
     default:
       return [];
   }
@@ -669,12 +871,13 @@ function buildFilterAutomations(song, cutoff) {
 }
 function buildEnsemble(song) {
   const spec = getGenre(song.genre).filterAutomation;
-  const bus = new Tone.Gain(1);
+  const bus = new Tone.Gain(0.9);
+  const subCut = new Tone.Filter(30, "highpass");
   const masterFilter = spec?.target === "master" ? new Tone.Filter(spec.open, "lowpass") : null;
   const fx = masterFx(song.genre);
-  const compressor = new Tone.Compressor(-14, 3);
+  const compressor = new Tone.Compressor({ threshold: -14, ratio: 3, attack: 0.03, release: 0.25, knee: 8 });
   const limiter = new Tone.Limiter(-1);
-  bus.chain(...masterFilter ? [masterFilter] : [], ...fx, compressor, limiter, Tone.getDestination());
+  bus.chain(subCut, ...masterFilter ? [masterFilter] : [], ...fx, compressor, limiter, Tone.getDestination());
   const isPhonk = song.genre === "phonk";
   const extras = [];
   if (song.genre === "noir") {
@@ -720,6 +923,8 @@ function buildEnsemble(song) {
     if (isPhonk && t.role === "drums") return makeDrumKit(bus, { hatBus: duck, onKick });
     if (isPhonk && t.role === "lead") return makePhonkCowbell(duck);
     if (song.genre === "noir" && t.role === "drums") return makeDrumKit(bus, { dullKick: true });
+    if ((song.genre === "doomerwave" || song.genre === "doomerrun") && t.role === "drums")
+      return makeDrumKit(bus, { softKick: true, gatedSnare: true });
     return voiceForTrack(t, song.bpm, bus);
   });
   const cutoffOf = (target) => target === "master" ? masterFilter?.frequency : voices[song.tracks.findIndex((t) => t.role === target)]?.cutoff;
@@ -736,6 +941,7 @@ function buildEnsemble(song) {
       for (const v of voices) v.dispose();
       for (const x of extras) x.dispose();
       bus.dispose();
+      subCut.dispose();
       masterFilter?.dispose();
       for (const node of fx) node.dispose();
       compressor.dispose();
@@ -813,6 +1019,22 @@ function audioBufferToWav(buffer) {
 
 // src/audio/player.ts
 import * as Tone3 from "tone";
+var rtConfigured = false;
+function configureRealtimeAudio() {
+  if (rtConfigured) return;
+  rtConfigured = true;
+  try {
+    const ctx = new Tone3.Context({ latencyHint: "playback" });
+    ctx.lookAhead = 0.2;
+    Tone3.setContext(ctx);
+  } catch {
+    try {
+      Tone3.getContext().lookAhead = 0.2;
+    } catch {
+    }
+  }
+}
+configureRealtimeAudio();
 function createPlayer(song, opts = {}) {
   const secPerTick = 60 / song.bpm / PPQ;
   const durationSec = song.durationTicks * secPerTick;

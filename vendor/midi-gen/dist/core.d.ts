@@ -1,5 +1,5 @@
-import { G as GenreId, S as Song, M as Mode, T as TrackRole, a as Section, b as Track } from './types-GdXF28I4.js';
-export { D as DRUM_CHANNEL, c as GENRE_IDS, N as NoteEvent, P as PPQ } from './types-GdXF28I4.js';
+import { G as GenreId, S as Song, M as Mode, T as TrackRole, a as Section, b as Track } from './types-p4-XIigf.js';
+export { D as DRUM_CHANNEL, c as GENRE_IDS, N as NoteEvent, P as PPQ } from './types-p4-XIigf.js';
 
 interface GenerateOptions {
     genre?: GenreId;
@@ -154,7 +154,7 @@ interface GenContext {
 type PartGenerator = (ctx: GenContext) => Track | null;
 /** Tracker arp cycle shapes. 'thumb' alternates the root with every other tone. */
 type ArpPattern = 'up' | 'down' | 'updown' | 'octaves' | 'thumb';
-type BassStyle = 'synth8' | 'walking' | 'boogie' | 's808' | 'march' | 'sustain' | 'octave8' | 'syncopated16';
+type BassStyle = 'synth8' | 'walking' | 'boogie' | 's808' | 'march' | 'sustain' | 'octave8' | 'syncopated16' | 'gallop' | 'chug';
 interface GenreConfig {
     id: GenreId;
     name: string;
