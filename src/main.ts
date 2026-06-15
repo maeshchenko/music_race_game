@@ -127,12 +127,18 @@ function nextEndlessSong(): Promise<Song> {
     pregenNext();
     return Promise.resolve(s);
   }
-  const p = newSongAsync(randomGenre());
+  const p = newSongAsync(nextGenre());
   pregenNext();
   return p;
 }
 
-const randomGenre = (): GameGenre => GENRES[Math.floor(Math.random() * GENRES.length)];
+// первые три заезда сессии — фиксированный порядок, дальше полностью случайно
+const PLANNED_GENRES: GameGenre[] = ['grimerun', 'doomerrun', 'nightcorerun'];
+let plannedIdx = 0;
+const nextGenre = (): GameGenre =>
+  plannedIdx < PLANNED_GENRES.length
+    ? PLANNED_GENRES[plannedIdx++]
+    : GENRES[Math.floor(Math.random() * GENRES.length)];
 
 // --- генерация трека в воркере: тяжёлый синтез вне UI-потока (без фриза) ----
 let songWorker: Worker | null = null;
@@ -166,8 +172,9 @@ function newSongAsync(genre: GameGenre): Promise<Song> {
 /** Генерация следующего трека заранее — переход между заездами без паузы. */
 function pregenNext() {
   if (nextSong) return;
-  newSongAsync(randomGenre()).then((s) => { nextSong = s; })
-    .catch(() => { nextSong = newSong(randomGenre()); });
+  const g = nextGenre();
+  newSongAsync(g).then((s) => { nextSong = s; })
+    .catch(() => { nextSong = newSong(g); });
 }
 // --- громкость: музыка через мастер, эффекты — смещением в Sfx ----------
 const VOL_KEY = 'race2107:vol';
@@ -315,7 +322,7 @@ async function startRide() {
   await nextPaint();
   // свежий случайный трек; следующий уже готов из pregenNext
   if (SIMPLE_MENU && !replayRequested) {
-    tracks = [nextSong ?? await newSongAsync(randomGenre())];
+    tracks = [nextSong ?? await newSongAsync(nextGenre())];
     nextSong = null;
     sel = 0;
   }
@@ -366,9 +373,7 @@ async function startEndless() {
   setLoader(10, 'генерируем трассу…');
   await nextPaint();
   // первая трасса сессии — всегда граймран (ниже тема — снежная ночь)
-  const song = firstEndlessRun
-    ? await newSongAsync('grimerun')
-    : (nextSong ?? await newSongAsync(randomGenre()));
+  const song = nextSong ?? await newSongAsync(nextGenre());
   nextSong = null;
   // казино первого сегмента: lucky-ярлык; дальше цепочка решает сама
   luckyRun = --runsUntilLucky <= 0;
