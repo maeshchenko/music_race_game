@@ -21,6 +21,10 @@ export interface Level {
   curveAt(dist: number): number;
   /** Энергия секции (0..1) в момент t секунд — для динамики света/сведения (#39). */
   energyAt(t: number): number;
+  /** Полосность дороги на дистанции dist: 0 — 2 полосы, 1 — 3 (шоссе). */
+  wideAt(dist: number): number;
+  /** Тип района: 0 провинция, 1 поле, 2 город(+шоссе). */
+  districtAt(dist: number): number;
 }
 
 // скорость = база + bpm·коэф: компрессия, чтобы быстрые треки (BPM 150+) не
@@ -220,5 +224,9 @@ const VREF = 42; // ~150 км/ч
     heightAt: (d) => sample(hArr, d),
     curveAt: (d) => sample(xArr, d),
     energyAt: (t) => energyAt(t),
+    // single-track режим — всегда провинция/2 полосы (районы и шоссе работают в
+    // endless, где профиль задаётся глобальной дорогой road.ts/makeRoad).
+    wideAt: () => 0,
+    districtAt: () => 0,
   };
 }

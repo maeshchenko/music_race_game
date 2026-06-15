@@ -117,6 +117,7 @@ const ENDLESS = true;
 const STUB_LEVEL: Level = {
   durationSec: 0, totalDist: 0,
   distAt: () => 0, speedAt: () => 25, heightAt: () => 0, curveAt: () => 0, energyAt: () => 0.5,
+  wideAt: () => 0, districtAt: () => 0,
 };
 
 /** Источник следующего трека для цепочки: берёт пред-сген или генерит, греет след. */

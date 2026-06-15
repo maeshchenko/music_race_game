@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildCar, SHARED_CAR_GEOS } from './car';
+import { laneOffset, availableLanes } from './road';
 import type { Level } from './level';
 import type { Blocks } from './blocks';
 import type { Difficulty } from './blocks';
@@ -10,8 +11,6 @@ import type { Difficulty } from './blocks';
  * свободной от потока блоков в точке встречи — уворот всегда возможен,
  * невозможного выбора «блок или столкновение» не бывает.
  */
-
-const LANE_X = 2.7;
 
 // генерим гуще запаса — рантайм-интенсивность активирует часть (см. setIntensity);
 // низкая интенсивность = редкий трафик, высокая = весь поток (веселее на харде)
@@ -63,7 +62,8 @@ export class Traffic {
       const meetDist = level.distAt(t);
       // полоса, свободная от блоков вокруг точки встречи
       const used = blocks.lanesNear(meetDist, 18);
-      const free = [-1, 0, 1].filter((l) => !used.has(l));
+      // только полосы, существующие на этой дистанции (2 или 3) и свободные от блоков
+      const free = availableLanes(level.wideAt(meetDist)).filter((l) => !used.has(l));
       if (free.length) {
         const lane = free[Math.floor(Math.random() * free.length)];
         // порог: ~40% преград «ядро» (видны всегда), остальные — за интенсивностью
@@ -128,7 +128,7 @@ export class Traffic {
       const visible = pos > carDist - 35 && pos < carDist + 220;
       o.group.visible = visible;
       if (!visible) continue;
-      const x = level.curveAt(pos) + o.lane * LANE_X;
+      const x = level.curveAt(pos) + laneOffset(o.lane, level.wideAt(pos));
       const y = level.heightAt(pos) + (o.kind === 'pile' ? 0.35 : 0);
       o.group.position.set(x, y, -pos);
       if (o.kind !== 'pile') {

@@ -13,6 +13,7 @@ import {
   type Difficulty, type BlockExtras, type BlockDef,
 } from './blocks';
 import { makeGate } from './gate';
+import { steerRange } from './road';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
 import { Sfx } from './sfx';
@@ -22,7 +23,6 @@ import { EndlessChain } from './chain';
 import type { Conductor } from '../conductor';
 import type { Song } from 'midi-gen/core';
 
-const STEER_RANGE = 3.2;
 
 // константы кадра — выносим из tick, чтобы не аллоцировать каждый кадр/сбор
 const MILESTONES = [0, 5, 10, 15, 20, 30, 50];
@@ -185,7 +185,8 @@ export class Game {
     this.car = buildCar({ color: extras.carColor ?? 0x6b1220 });
     // замыкания мира читают this.level — в endless ниже он становится цепочкой
     this.world = new World(
-      (z) => this.level.heightAt(-z), (z) => this.level.curveAt(-z), extras.theme,
+      (z) => this.level.heightAt(-z), (z) => this.level.curveAt(-z),
+      (z) => this.level.wideAt(-z), (z) => this.level.districtAt(-z), extras.theme,
     );
     if (extras.theme) this.themeIndex = Math.max(0, THEMES.indexOf(extras.theme));
     // кеш материала задней фары (обе фары делят один материал) и glow-ореолов
@@ -921,8 +922,7 @@ export class Game {
       this.nextNovelty = t + 35 + Math.random() * 20;
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
       const th = THEMES[this.themeIndex];
-      this.world.applyTheme(th);
-      this.world.setBiome(this.themeIndex); // район меняется — примут чанки впереди по мере въезда
+      this.world.applyTheme(th); // только палитра/погода; районы (провинция/поле/город) идут по дистанции дороги
       this.pop(`🎨 ${th.name}`, 'pop-theme');
       if (comfortable) this.goldenUntil = Math.max(this.goldenUntil, t + 3); // вызов+награда заскучавшему
     }
@@ -992,7 +992,8 @@ export class Game {
 
     // руление мышью с плавным догоном и креном
     // быстрый догон курсора (ритм-игра), вес — в крене и довороте носа
-    const target = THREE.MathUtils.clamp(this.mouseX, -1, 1) * STEER_RANGE;
+    // предел руля следует ширине дороги (2 полосы — уже, 3 — шире)
+    const target = THREE.MathUtils.clamp(this.mouseX, -1, 1) * steerRange(this.level.wideAt(dist));
     const prevX = this.carX;
     this.carX = THREE.MathUtils.damp(this.carX, target, 14, dt);
     // боковая скорость для крена/доворота — сглажена EMA: сырой Δ/dt шумит на

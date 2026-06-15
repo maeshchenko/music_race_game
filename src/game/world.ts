@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildCar } from './car';
+import { halfWidth, HALF_WIDE, LANE_DIVIDER } from './road';
 import { IS_MOBILE } from '../platform';
 
 /**
@@ -16,12 +17,8 @@ import { IS_MOBILE } from '../platform';
 
 const CHUNK_LEN = 60;
 const CHUNKS = IS_MOBILE ? 8 : 13; // мобайл — короче улица (меньше инстансов/тумана)
-// Сеттинг — ПРОВИНЦИЯ 90х. Городские элементы (высотка/ТЦ из kinds + неон-билборды
-// + эстакады/арки) ломают сеттинг → пока СКРЫТЫ. Не удалены, геометрия/материалы
-// целы — вернуть можно одним флагом true (пригодятся для «центра» большого города).
-const SHOW_URBAN = false;
 const LAMP_SPACING = 20;
-const ROAD_W = 9;
+const ROAD_W = HALF_WIDE * 2; // полная ширина полотна (3 полосы); 2-полосный режим ужимает его
 const POOLED_LIGHTS = IS_MOBILE ? 2 : 4;
 
 /** Высота мира в точке z (мировая координата, вперёд = -z). */
@@ -84,12 +81,43 @@ export interface Biome {
   kinds: number[];
   tree: number; fir: number; billboard: number;
   garage: number; kiosk: number; stop: number; parked: number; bridge: number;
+  /** Плотность застройки: 1 — дома плотно вдоль дороги; <1 — редкие дома, между
+   *  ними открытое поле (большие просветы). По умолчанию 1. */
+  build?: number;
+  /** Разрешить высотные дома (kinds 4/5) — для городского/шоссе-биома. */
+  urban?: boolean;
+  /** Разметка на 3 полосы (доп. пунктиры-разделители) — для шоссе. */
+  lanes?: boolean;
 }
 export const BIOMES: Biome[] = [
   { name: 'спальный район', kinds: [0, 1, 2, 3], tree: 0.55, fir: 0.55, billboard: 0.25, garage: 0.4, kiosk: 0.3, stop: 0.3, parked: 0.55, bridge: 0.15 },
   { name: 'центр', kinds: [1, 2, 3, 4, 5], tree: 0.2, fir: 0.3, billboard: 0.7, garage: 0.1, kiosk: 0.45, stop: 0.4, parked: 0.6, bridge: 0.28 },
   { name: 'промзона', kinds: [6, 2, 0, 6], tree: 0.18, fir: 0.2, billboard: 0.3, garage: 0.65, kiosk: 0.15, stop: 0.15, parked: 0.4, bridge: 0.22 },
   { name: 'окраина', kinds: [0, 1], tree: 0.85, fir: 0.8, billboard: 0.08, garage: 0.25, kiosk: 0.15, stop: 0.2, parked: 0.3, bridge: 0.1 },
+  // поле: открытый простор — густые деревья, фонари вдоль дороги, лишь редкие
+  // кубики-пятиэтажки с тёплыми окнами далеко друг от друга.
+  { name: 'поле', kinds: [7, 7, 8], tree: 0.95, fir: 0.7, billboard: 0, garage: 0.12, kiosk: 0.1, stop: 0.15, parked: 0.2, bridge: 0, build: 0.045 },
+  // шоссе: трёхполосная разметка, плотная городская застройка — высотки (4)
+  // вперемешку с панельками (1,2) и свечками (3).
+  { name: 'шоссе', kinds: [1, 2, 3, 4, 1, 2], tree: 0.25, fir: 0.2, billboard: 0, garage: 0.2, kiosk: 0.3, stop: 0.3, parked: 0.7, bridge: 0, urban: true, lanes: true },
+];
+
+/**
+ * Район по типу дороги (см. road.ts districtAt): 0 провинция (база), 1 поле,
+ * 2 город (+шоссе, 3 полосы). Это и есть «районы» — застройка задаётся типом,
+ * а не случайной ротацией. kinds — индексы в World.kinds (0..8).
+ */
+interface District {
+  kinds: number[]; tree: number; fir: number;
+  garage: number; kiosk: number; stop: number; parked: number; build: number;
+}
+const DISTRICTS: District[] = [
+  // 0 ПРОВИНЦИЯ (база): хрущёвки/панельки/свечки, дворы, деревья
+  { kinds: [0, 1, 2, 3], tree: 0.55, fir: 0.55, garage: 0.4, kiosk: 0.3, stop: 0.3, parked: 0.55, build: 1 },
+  // 1 ПОЛЕ: редкие будки-кубики, густые ёлки, простор
+  { kinds: [7, 7, 8], tree: 0.95, fir: 0.7, garage: 0.12, kiosk: 0.1, stop: 0.15, parked: 0.2, build: 0.045 },
+  // 2 ГОРОД (+шоссе/3 полосы): высотки (4) вперемешку с панельками/свечками
+  { kinds: [1, 2, 3, 4], tree: 0.2, fir: 0.2, garage: 0.15, kiosk: 0.35, stop: 0.35, parked: 0.7, build: 1 },
 ];
 
 // --- процедурная текстура панельки --------------------------------------
@@ -97,6 +125,7 @@ export const BIOMES: Biome[] = [
 interface BuildingKind {
   w: number; h: number; d: number;
   mats: THREE.Material[];
+  sink: number; // насколько утоплен в рельеф (большие дома ~1м; будка — 0, стоит на земле)
 }
 
 function panelTextures(
@@ -143,7 +172,7 @@ function panelTextures(
 }
 
 function buildingKind(
-  w: number, h: number, d: number, floors: number, cols: number, base: string, lit = 0.28,
+  w: number, h: number, d: number, floors: number, cols: number, base: string, lit = 0.28, sink = 1,
 ): BuildingKind {
   const { map, emissiveMap } = panelTextures(floors, cols, base, lit);
   const side = new THREE.MeshLambertMaterial({
@@ -151,7 +180,7 @@ function buildingKind(
   });
   const roof = new THREE.MeshLambertMaterial({ color: 0x23252b });
   // порядок граней BoxGeometry: +x -x +y -y +z -z
-  return { w, h, d, mats: [side, side, roof, roof, side, side] };
+  return { w, h, d, mats: [side, side, roof, roof, side, side], sink };
 }
 
 /** Радиальный тёплый градиент — имитация блика фонаря на мокром асфальте. */
@@ -210,9 +239,9 @@ class InstancePool {
     scene.add(this.mesh);
   }
 
-  set(slot: number, x: number, y: number, z: number, ry: number, sx: number, sy: number, sz: number, colorHex?: number) {
+  set(slot: number, x: number, y: number, z: number, ry: number, sx: number, sy: number, sz: number, colorHex?: number, rx = 0) {
     _pos.set(x, y, z);
-    _eul.set(0, ry, 0);
+    _eul.set(rx, ry, 0);
     _quat.setFromEuler(_eul);
     _scl.set(sx, sy, sz);
     this.mesh.setMatrixAt(slot, _m4.compose(_pos, _quat, _scl));
@@ -264,15 +293,21 @@ class GroupPool {
  * (тот же Float32Array), без аллокации геометрии/меша. Было: каждый recycle
  * создавал новые PlaneGeometry + computeVertexNormals для всех полос = спайк.
  */
-interface StripDef { w: number; mat: THREE.Material; x: number; yOff: number; segs: number; }
+interface StripDef {
+  w: number; mat: THREE.Material; yOff: number; segs: number;
+  role: 'ground' | 'road' | 'edge';
+  side?: -1 | 1;    // сторона дороги (для edge — обочина/тротуар)
+  edgeOff?: number; // смещение центра полосы от кромки проезжей части
+}
 const STRIP_ZMID = -CHUNK_LEN / 2;
+const ROAD_HALF = ROAD_W / 2; // базовая полуширина дорожной геометрии (= halfWidth(1))
 class StripPool {
   private meshes: THREE.Mesh[][] = []; // [slot][stripIdx]
   private xs: Float32Array[] = [];     // базовый X вершин на тип полосы
   private zs: Float32Array[] = [];     // локальный Z вершин на тип полосы
   constructor(
     private defs: StripDef[], chunks: number, scene: THREE.Scene,
-    private hAt: HeightFn, private cAt: CurveFn,
+    private hAt: HeightFn, private cAt: CurveFn, private wAt: (z: number) => number,
   ) {
     for (let d = 0; d < defs.length; d++) {
       const g = new THREE.PlaneGeometry(defs[d].w, CHUNK_LEN, 1, defs[d].segs);
@@ -306,12 +341,17 @@ class StripPool {
       const xs = this.xs[d], zs = this.zs[d];
       for (let i = 0; i < p.count; i++) {
         const wz = zc + zs[i];
+        const hw = halfWidth(this.wAt(wz)); // текущая полуширина проезжей части
+        let x = this.cAt(wz);
+        if (def.role === 'road') x += xs[i] * (hw / ROAD_HALF); // полотно сужается/расширяется
+        else if (def.role === 'edge') x += xs[i] + def.side! * (hw + def.edgeOff!); // обочина/тротуар у кромки
+        else x += xs[i]; // земля — без изменения ширины
         p.setY(i, this.hAt(wz) + def.yOff);
-        p.setX(i, xs[i] + this.cAt(wz));
+        p.setX(i, x);
       }
       p.needsUpdate = true;
       m.geometry.computeVertexNormals();
-      m.position.set(def.x, 0, zc);
+      m.position.set(0, 0, zc);
     }
   }
   dispose() {
@@ -409,11 +449,12 @@ export class World {
   private hemi: THREE.HemisphereLight;
   // #16 материалы, пульсирующие по биту (эмиссив окон/фонарей, ореолы)
   private pulseTargets!: { mat: THREE.Material; prop: string; base: number; amp: number }[];
-  private biomeIdx = 0; // текущий биом-сет (см. BIOMES); ротация через новизну
 
   constructor(
     private hAt: HeightFn = () => 0,
     private cAt: CurveFn = () => 0,
+    private wAt: (z: number) => number = () => 0, // полосность дороги (0 — 2 полосы, 1 — 3)
+    private dAt: (z: number) => number = () => 0, // тип района (0 провинция, 1 поле, 2 город)
     theme: WorldTheme = THEMES[0],
   ) {
     this.theme = theme;
@@ -440,6 +481,8 @@ export class World {
       buildingKind(16, 54, 16, 18, 5, '#3c4048', 0.34), // высотка 18 эт.
       buildingKind(34, 12, 22, 3, 14, '#54514a', 0.5), // ТЦ — широкий, ярко горит
       buildingKind(24, 18, 20, 4, 6, '#3a3833', 0.12), // промздание — тёмное, редкие окна
+      buildingKind(2.6, 2.6, 2.6, 1, 1, '#3f3b36', 1.0, 0), // 7 будка-кубик: окошко горит (для поля)
+      buildingKind(2.6, 2.6, 2.6, 1, 1, '#3f3b36', 0.0, 0), // 8 будка-кубик: окошко потушено
     ];
 
     // --- создаём пулы инстансов (один draw call на тип на ВСЕ чанки) ---
@@ -449,7 +492,7 @@ export class World {
       this.pools.push(p);
       return p;
     };
-    this.pLine = mk(this.lineGeo, this.lineMat, 12);
+    this.pLine = mk(this.lineGeo, this.lineMat, 30); // центр + 2 разделителя полос (шоссе)
     this.pPole = mk(this.poleGeo, this.poleMat, 4);
     this.pHead = mk(this.headGeo, this.lampHeadMat, 4);
     this.pCone = mk(this.coneGeo, this.coneMat, 4);
@@ -470,13 +513,13 @@ export class World {
     );
     this.gStop = new GroupPool(() => this.makeStop(), 1, C, this.scene);
     this.strips = new StripPool([
-      { w: 500, mat: this.groundMat, x: 0, yOff: -0.14, segs: 16 }, // земля до домов
-      { w: ROAD_W, mat: this.roadMat, x: 0, yOff: 0, segs: 16 },
-      { w: 2.4, mat: this.shoulderMat, x: -(ROAD_W / 2 + 1.2), yOff: 0.012, segs: 16 },
-      { w: 2.4, mat: this.shoulderMat, x: ROAD_W / 2 + 1.2, yOff: 0.012, segs: 16 },
-      { w: 3.4, mat: this.sidewalkMat, x: -(ROAD_W / 2 + 2.4 + 1.7), yOff: 0.06, segs: 16 },
-      { w: 3.4, mat: this.sidewalkMat, x: ROAD_W / 2 + 2.4 + 1.7, yOff: 0.06, segs: 16 },
-    ], C, this.scene, this.hAt, this.cAt);
+      { w: 500, mat: this.groundMat, yOff: -0.14, segs: 16, role: 'ground' }, // земля до домов
+      { w: ROAD_W, mat: this.roadMat, yOff: 0, segs: 16, role: 'road' }, // полотно — ширина по wAt
+      { w: 2.4, mat: this.shoulderMat, yOff: 0.012, segs: 16, role: 'edge', side: -1, edgeOff: 1.2 },
+      { w: 2.4, mat: this.shoulderMat, yOff: 0.012, segs: 16, role: 'edge', side: 1, edgeOff: 1.2 },
+      { w: 3.4, mat: this.sidewalkMat, yOff: 0.06, segs: 16, role: 'edge', side: -1, edgeOff: 4.1 },
+      { w: 3.4, mat: this.sidewalkMat, yOff: 0.06, segs: 16, role: 'edge', side: 1, edgeOff: 4.1 },
+    ], C, this.scene, this.hAt, this.cAt, this.wAt);
 
     for (let i = 0; i < POOLED_LIGHTS; i++) {
       // конус вниз, угол как у видимого плафона: atan(2.6 / 4.8) ≈ 0.5 рад —
@@ -591,29 +634,44 @@ export class World {
   private writeChunk(chunk: Chunk) {
     const { slot, index } = chunk;
     const chunkZ = -index * CHUNK_LEN;
-    const bm = BIOMES[this.biomeIdx];
+    // район по дистанции (провинция/поле/город) — задаёт застройку И ширину дороги
+    const bm = DISTRICTS[this.dAt(chunkZ - CHUNK_LEN / 2)] ?? DISTRICTS[0];
     chunk.lampHeads.length = 0;
 
-    // полотно дороги/земли/обочин/тротуаров (следует рельефу)
+    // полотно дороги/земли/обочин/тротуаров (следует рельефу + ширине полос)
     this.strips.write(slot, chunkZ);
+
+    // кромка проезжей части (растёт на 3-полосных шоссе-участках) — декор стоит у неё
+    const edge = (wz: number) => halfWidth(this.wAt(wz));
 
     // курсоры записи по каждому пулу (в пределах слота)
     const cur = new Map<InstancePool, number>();
     const put = (
       p: InstancePool, x: number, y: number, z: number,
-      ry = 0, sx = 1, sy = 1, sz = 1, color?: number,
+      ry = 0, sx = 1, sy = 1, sz = 1, color?: number, rx = 0,
     ) => {
       const c = cur.get(p) ?? 0;
       if (c >= p.perChunk) return; // переполнение слота — лишнее не рисуем
-      p.set(slot * p.perChunk + c, x, y, z, ry, sx, sy, sz, color);
+      p.set(slot * p.perChunk + c, x, y, z, ry, sx, sy, sz, color, rx);
       cur.set(p, c + 1);
     };
+    // ориентация плоского декора под дорогу: рыскание по повороту + тангаж по уклону
+    const yawAt = (wz: number) => Math.atan2(this.cAt(wz + 2) - this.cAt(wz - 2), 4);
+    const pitchAt = (wz: number) => -Math.atan2(this.hAt(wz + 2) - this.hAt(wz - 2), 4);
 
-    // прерывистая осевая, местами стёртая
+    // прерывистая осевая, местами стёртая; на шоссе — ещё 2 разделителя полос
     for (let z = 2; z < CHUNK_LEN; z += 6) {
       if (Math.random() < 0.2) continue;
       const wz = chunkZ - z;
-      put(this.pLine, this.cAt(wz), this.hAt(wz) + 0.03, wz);
+      const cx = this.cAt(wz), y = this.hAt(wz) + 0.05;
+      const ry = yawAt(wz), rx = pitchAt(wz); // штрих параллелен дороге и лежит на уклоне
+      // 2 полосы → 1 линия по центру; 3 полосы → 2 линии-разделителя (между полосами)
+      if (this.wAt(wz) > 0.5) {
+        put(this.pLine, cx - LANE_DIVIDER, y, wz, ry, 1, 1, 1, undefined, rx);
+        put(this.pLine, cx + LANE_DIVIDER, y, wz, ry, 1, 1, 1, undefined, rx);
+      } else {
+        put(this.pLine, cx, y, wz, ry, 1, 1, 1, undefined, rx);
+      }
     }
 
     // пятна снега на обочинах
@@ -621,7 +679,7 @@ export class World {
       const s = Math.random() < 0.5 ? -1 : 1;
       const wz = chunkZ - Math.random() * CHUNK_LEN;
       const sxw = 0.8 + Math.random() * 2.2, szl = 1.2 + Math.random() * 3;
-      put(this.pPatch, s * (ROAD_W / 2 + 0.6 + Math.random() * 4.5) + this.cAt(wz),
+      put(this.pPatch, s * (edge(wz) + 0.6 + Math.random() * 4.5) + this.cAt(wz),
         this.hAt(wz) + 0.075, wz, 0, sxw, 1, szl);
     }
 
@@ -630,19 +688,21 @@ export class World {
       const s = (Math.floor(z / LAMP_SPACING) + index) % 2 === 0 ? -1 : 1;
       const wz = chunkZ - z;
       const cx = this.cAt(wz);
-      const x = s * (ROAD_W / 2 + 0.9) + cx;
+      const x = s * (edge(wz) + 0.9) + cx;
       const hx = x - s * 0.55; // головка нависает над дорогой
       const h = this.hAt(wz);
       put(this.pPole, x, h + 2.7, wz);
       put(this.pHead, hx, h + 5.35, wz);
       put(this.pCone, hx, h + 3.0, wz);
-      put(this.pGlow, hx, h + 0.05, wz);
+      put(this.pGlow, hx, h + 0.05, wz, 0, 1, 1, 1, undefined, pitchAt(wz));
       chunk.lampHeads.push(new THREE.Vector3(hx, h + 5.1, wz));
     }
 
     // панельки по сторонам. В провинц-режиме отсекаем высотку(4)/ТЦ(5) —
     // промздание(6) провинциальное, остаётся.
-    const kinds = SHOW_URBAN ? bm.kinds : bm.kinds.filter((k) => k !== 4 && k !== 5);
+    const kinds = bm.kinds; // район уже задаёт нужные виды зданий
+    const density = bm.build; // <1 — редкая застройка (поле)
+    const fieldGap = density < 0.5; // большие просветы между домами
     const buildCur = new Map<number, number>(); // курсор по виду дома
     for (const s of [-1, 1]) {
       let z = -Math.random() * 14;
@@ -655,16 +715,17 @@ export class World {
         const wz = chunkZ + zc;
         const pool = this.pBuild[ki];
         const c = buildCur.get(ki) ?? 0;
-        if (c < pool.perChunk) {
+        // редкая застройка: дом ставим лишь с вероятностью density (иначе тут поле)
+        if (Math.random() < density && c < pool.perChunk) {
           pool.set(
             slot * pool.perChunk + c,
-            s * (ROAD_W / 2 + 8 + d / 2 + Math.random() * 14) + this.cAt(wz),
-            this.hAt(wz) + kind.h / 2 - 1, // чуть утоплены в рельеф
+            s * (edge(wz) + 8 + d / 2 + Math.random() * 14) + this.cAt(wz),
+            this.hAt(wz) + kind.h / 2 - kind.sink, // утоплены в рельеф (будка — на земле)
             wz, rot, kind.w, kind.h, kind.d,
           );
           buildCur.set(ki, c + 1);
         }
-        z -= w + 6 + Math.random() * 18;
+        z -= w + 6 + Math.random() * 18 + (fieldGap ? 30 + Math.random() * 40 : 0);
       }
     }
     // спрятать незаполненные слоты домов
@@ -680,7 +741,7 @@ export class World {
         z -= 9 + Math.random() * 16;
         if (Math.random() >= bm.tree) continue; // густота деревьев — по биому
         const wz = chunkZ + z;
-        const x = s * (ROAD_W / 2 + 6 + Math.random() * 16) + this.cAt(wz);
+        const x = s * (edge(wz) + 6 + Math.random() * 16) + this.cAt(wz);
         const h = this.hAt(wz);
         if (Math.random() < bm.fir) {
           put(this.pFir, x, h + 1.8, wz);
@@ -700,7 +761,7 @@ export class World {
       for (let g = 0; g < n; g++) {
         const z = z0 - g * 3.6;
         const wz = chunkZ + z;
-        const x = s * (ROAD_W / 2 + 17 + Math.random() * 2) + this.cAt(wz);
+        const x = s * (edge(wz) + 17 + Math.random() * 2) + this.cAt(wz);
         const h = this.hAt(wz);
         put(this.pGarage, x, h + 1.25, wz, Math.PI / 2, 1, 1, 1,
           this.garageColors[Math.floor(Math.random() * this.garageColors.length)]);
@@ -712,7 +773,7 @@ export class World {
     if (Math.random() < bm.kiosk) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const wz = chunkZ - Math.random() * CHUNK_LEN;
-      const x = s * (ROAD_W / 2 + 7.5) + this.cAt(wz);
+      const x = s * (edge(wz) + 7.5) + this.cAt(wz);
       const h = this.hAt(wz);
       put(this.pKiosk, x, h + 1.2, wz);
       put(this.pKioskWin, x - s * 1.31, h + 1.35, wz, -s * Math.PI / 2);
@@ -724,7 +785,7 @@ export class World {
       if (Math.random() < bm.stop) {
         const s = Math.random() < 0.5 ? -1 : 1;
         const wz = chunkZ - 10 - Math.random() * (CHUNK_LEN - 20);
-        stopG.position.set(s * (ROAD_W / 2 + 4.6) + this.cAt(wz), this.hAt(wz), wz);
+        stopG.position.set(s * (edge(wz) + 4.6) + this.cAt(wz), this.hAt(wz), wz);
         // задняя стенка/лавка на сторону дороги: масштаб по z отражает сторону
         stopG.scale.z = s;
         stopG.visible = true;
@@ -739,7 +800,7 @@ export class World {
         if (p < n) {
           const s = Math.random() < 0.5 ? -1 : 1;
           const wz = chunkZ - Math.random() * CHUNK_LEN;
-          carG.position.set(s * (ROAD_W / 2 + 1.6) + this.cAt(wz), this.hAt(wz), wz);
+          carG.position.set(s * (edge(wz) + 1.6) + this.cAt(wz), this.hAt(wz), wz);
           carG.rotation.y = (Math.random() < 0.85 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.06;
           carG.visible = true;
         } else carG.visible = false;
@@ -755,15 +816,6 @@ export class World {
         for (let c = cur.get(p) ?? 0; c < p.perChunk; c++) p.hide(slot * p.perChunk + c);
       }
     }
-  }
-
-  /**
-   * Сменить биом-сет. БЕЗ пересборки (она = 13 чанков разом = спайк/хрип):
-   * чанки впереди примут новый биом по мере рециклинга — въезжаешь в новый
-   * район плавно за ~780 м (естественный переход, ноль спайка).
-   */
-  setBiome(i: number) {
-    this.biomeIdx = ((i % BIOMES.length) + BIOMES.length) % BIOMES.length;
   }
 
   /**

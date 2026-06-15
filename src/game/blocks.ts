@@ -3,6 +3,7 @@ import type { Song } from 'midi-gen/core';
 import type { Level } from './level';
 import { buildBeatGrid, extractRhythm, classifyTick } from './rhythm';
 import { getArchTemplate, getArchScale, getArchBaseY } from './assets';
+import { laneOffset } from './road';
 
 /** Сила доли блока: размер + пульс-кик. */
 export type BeatType = 'strong' | 'weak' | 'off' | 'solo';
@@ -16,7 +17,6 @@ export type Voice = 'lead' | 'bass' | 'kick' | 'snare';
  * перестроиться. Дальние прыжки (край→край) — только хард, редко.
  */
 
-const LANE_X = 2.7; // три полосы: -2.7, 0, +2.7
 const COLLECT_LATERAL = 1.45;
 const CLUSTER_SEC = 0.09; // ноты ближе — один блок-аккорд
 
@@ -381,10 +381,15 @@ export class Blocks {
       }
       const isDrop = markDrop; markDrop = false;
       const dist = level.distAt(c.t);
+      // полосность дороги в этой точке: в 2-полосной зоне центр (0) недоступен —
+      // уводим блок в ближнюю внешнюю полосу (1 шаг ±1, достижимо). Профиль ширины
+      // рампится ~60м → перестроение растянуто на несколько блоков, не телепорт.
+      const w = level.wideAt(dist);
+      if (w < 0.5 && lane === 0) { lane = patDir >= 0 ? 1 : -1; lastShiftT = c.t; }
       this.defs.push({
         dist,
         lane,
-        x: level.curveAt(dist) + lane * LANE_X,
+        x: level.curveAt(dist) + laneOffset(lane, w),
         y: level.heightAt(dist) + BLOCK_Y,
         vel: c.vel,
         pitch: Math.round(c.pitch),
@@ -435,7 +440,7 @@ export class Blocks {
         this.defs.push({
           dist,
           lane: base.lane,
-          x: level.curveAt(dist) + base.lane * LANE_X,
+          x: level.curveAt(dist) + laneOffset(base.lane, level.wideAt(dist)),
           y: level.heightAt(dist) + BLOCK_Y,
           vel: 100,
           pitch: 60,
@@ -461,7 +466,7 @@ export class Blocks {
         this.defs.push({
           dist,
           lane: base.lane,
-          x: level.curveAt(dist) + base.lane * LANE_X,
+          x: level.curveAt(dist) + laneOffset(base.lane, level.wideAt(dist)),
           y: level.heightAt(dist) + BLOCK_Y,
           vel: 127,
           pitch: 60,
