@@ -24,12 +24,12 @@ export interface Level {
 }
 
 // скорость = база + bpm·коэф: компрессия, чтобы быстрые треки (BPM 150+) не
-// улетали в 250 км/ч, а типичные ~100 BPM давали ~110 на прямой
-const SPEED_BASE = 22; // м/с при 0 BPM
-const SPEED_PER_BPM = 0.06; // прибавка м/с на единицу BPM
+// улетали в крайности; типичные ~100 BPM дают ~155 на прямой, пол ~120 км/ч
+const SPEED_BASE = 32; // м/с при 0 BPM (~115 км/ч)
+const SPEED_PER_BPM = 0.11; // прибавка м/с на единицу BPM
 const DS = 4; // шаг сетки дороги, м
 const SIM_DT = 0.05; // шаг симуляции скорости, с
-const A_LAT = 7.0; // допустимое боковое ускорение в повороте, м/с² (выше — меньше режет)
+const A_LAT = 9.5; // допустимое боковое ускорение в повороте, м/с² (выше — меньше режет)
 
 /** Детерминированный PRNG из сида трека — трасса у кода всегда одна. */
 function lcg(seed: number): () => number {
@@ -138,11 +138,11 @@ export function buildLevel(song: Song): Level {
   // резкий — перед крутым поворотом скорость сбрасывается заранее сама
   // (лимит падает раньше, чем машина доезжает, за счёт плавных въездов).
 
-  const VMIN = 25; // нижний предел скорости, м/с (~90 км/ч) — не едем медленнее
+  const VMIN = 33; // нижний предел скорости, м/с (~120 км/ч) — не едем медленнее
 // опорная скорость стыка: каждый сегмент в endless начинается/кончается на ней,
 // поэтому на переходе трек→трек скорость непрерывна (нет толчка). Середина трека
 // по-прежнему гуляет по энергии музыки — сварка только у концов.
-const VREF = 30; // ~108 км/ч
+const VREF = 42; // ~150 км/ч
   const steps = Math.ceil(durationSec / SIM_DT) + 2;
   const sArr = new Float32Array(steps);
   const vArr = new Float32Array(steps);
@@ -157,12 +157,12 @@ const VREF = 30; // ~108 км/ч
       const kHere = Math.max(Math.abs(kap[i]), Math.abs(kap[iAhead]));
       const g = grd[i];
       // связь скорости с энергией мягче (0.85..1.1 вместо 0.7..1.2) — ровнее ход
-      let vLim = vBase * (0.85 + 0.25 * energyAt(k * SIM_DT));
+      let vLim = vBase * (0.78 + 0.4 * energyAt(k * SIM_DT));
       vLim = Math.min(vLim, Math.sqrt(A_LAT / Math.max(kHere, 1e-5)));
       vLim *= clamp(1 - g * 6, 0.55, 1.4); // в гору медленнее, с горы быстрее
       const kDyn = v > vLim ? 1.6 : 0.35; // тормоз злее разгона
       const a = clamp(kDyn * (vLim - v) - 9.8 * g, -8, 5);
-      v = Math.max(VMIN, v + a * SIM_DT); // не ниже 90 км/ч
+      v = Math.max(VMIN, v + a * SIM_DT); // не ниже VMIN (~120 км/ч)
       s += v * SIM_DT;
     }
   }
