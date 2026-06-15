@@ -6,10 +6,16 @@ import { IS_MOBILE } from '../platform';
  * Вечерняя провинция: дорога, панельки с тёплыми окнами, натриевые фонари,
  * снег. Мир — «беговая дорожка» из чанков: машина едет в -z, чанки позади
  * переезжают вперёд. Вся геометрия следует рельефу heightAt(z) из музыки.
+ *
+ * РЕНДЕР: весь повторяющийся декор (разметка, фонари, деревья, дома, гаражи,
+ * киоски, сугробы) живёт в пулах InstancedMesh — один draw call на тип на ВСЕ
+ * чанки вместо тысячи отдельных мешей. Машины/остановки — пул переиспользуемых
+ * групп. Переезд чанка (recycle) только ПЕРЕПИСЫВАЕТ матрицы инстансов своего
+ * слота — ноль аллокаций/dispose в кадре (был GC-спайк → подвисания).
  */
 
 const CHUNK_LEN = 60;
-const CHUNKS = 13; // ~780 м видимой улицы
+const CHUNKS = IS_MOBILE ? 8 : 13; // мобайл — короче улица (меньше инстансов/тумана)
 // Сеттинг — ПРОВИНЦИЯ 90х. Городские элементы (высотка/ТЦ из kinds + неон-билборды
 // + эстакады/арки) ломают сеттинг → пока СКРЫТЫ. Не удалены, геометрия/материалы
 // целы — вернуть можно одним флагом true (пригодятся для «центра» большого города).
@@ -165,13 +171,162 @@ function makeGlowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+// --- пулы инстансов -------------------------------------------------------
+// общие скретч-объекты композиции матрицы — без аллокаций в кадре/при recycle
+const _m4 = new THREE.Matrix4();
+const _pos = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _scl = new THREE.Vector3();
+const _eul = new THREE.Euler();
+const _col = new THREE.Color();
+const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0); // нулевой масштаб = инстанс не виден
+
+/**
+ * Пул одинаковых мешей одним InstancedMesh. Слоты нарезаны по чанкам:
+ * чанк со слотом `s` владеет инстансами [s*perChunk, (s+1)*perChunk). recycle
+ * перезаписывает ТОЛЬКО свой диапазон — без создания/уничтожения объектов.
+ */
+class InstancePool {
+  readonly mesh: THREE.InstancedMesh;
+  readonly perChunk: number;
+  private dirty = false;
+
+  constructor(
+    geo: THREE.BufferGeometry, mat: THREE.Material | THREE.Material[],
+    perChunk: number, chunks: number, scene: THREE.Scene, colored = false,
+  ) {
+    this.perChunk = perChunk;
+    const cap = perChunk * chunks;
+    this.mesh = new THREE.InstancedMesh(geo, mat, cap);
+    this.mesh.frustumCulled = false; // инстансы раскиданы по всей улице
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    for (let i = 0; i < cap; i++) this.mesh.setMatrixAt(i, HIDDEN);
+    if (colored) {
+      this.mesh.setColorAt(0, _col.setHex(0xffffff));
+      for (let i = 1; i < cap; i++) this.mesh.setColorAt(i, _col);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    scene.add(this.mesh);
+  }
+
+  set(slot: number, x: number, y: number, z: number, ry: number, sx: number, sy: number, sz: number, colorHex?: number) {
+    _pos.set(x, y, z);
+    _eul.set(0, ry, 0);
+    _quat.setFromEuler(_eul);
+    _scl.set(sx, sy, sz);
+    this.mesh.setMatrixAt(slot, _m4.compose(_pos, _quat, _scl));
+    if (colorHex !== undefined) this.mesh.setColorAt(slot, _col.setHex(colorHex));
+    this.dirty = true;
+  }
+
+  hide(slot: number) { this.mesh.setMatrixAt(slot, HIDDEN); this.dirty = true; }
+
+  flush() {
+    if (!this.dirty) return;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.dirty = false;
+  }
+
+  dispose() { this.mesh.geometry.dispose(); this.mesh.dispose(); }
+}
+
+/**
+ * Пул переиспользуемых групп (машины, остановки): сложно инстансить
+ * (мульти-материал + спрайты), но переиспользовать — легко. Строим один раз,
+ * далее только репозиционируем и прячем. Ноль аллокаций при recycle.
+ */
+class GroupPool {
+  readonly perChunk: number;
+  private groups: THREE.Group[] = [];
+  constructor(make: () => THREE.Group, perChunk: number, chunks: number, scene: THREE.Scene) {
+    this.perChunk = perChunk;
+    for (let i = 0; i < perChunk * chunks; i++) {
+      const g = make();
+      g.visible = false;
+      scene.add(g);
+      this.groups.push(g);
+    }
+  }
+  at(slot: number, c: number): THREE.Group { return this.groups[slot * this.perChunk + c]; }
+  dispose() {
+    for (const g of this.groups) g.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose();
+    });
+  }
+}
+
+/**
+ * Полосы дороги/земли/обочин/тротуаров — длинные кривые полотна, следуют
+ * рельефу (hAt/cAt вшиты в вершины), инстансить нельзя. Но переиспользовать —
+ * можно: один меш на слот-чанк, при recycle ПЕРЕЗАПИСЫВАЕМ вершины на месте
+ * (тот же Float32Array), без аллокации геометрии/меша. Было: каждый recycle
+ * создавал новые PlaneGeometry + computeVertexNormals для всех полос = спайк.
+ */
+interface StripDef { w: number; mat: THREE.Material; x: number; yOff: number; segs: number; }
+const STRIP_ZMID = -CHUNK_LEN / 2;
+class StripPool {
+  private meshes: THREE.Mesh[][] = []; // [slot][stripIdx]
+  private xs: Float32Array[] = [];     // базовый X вершин на тип полосы
+  private zs: Float32Array[] = [];     // локальный Z вершин на тип полосы
+  constructor(
+    private defs: StripDef[], chunks: number, scene: THREE.Scene,
+    private hAt: HeightFn, private cAt: CurveFn,
+  ) {
+    for (let d = 0; d < defs.length; d++) {
+      const g = new THREE.PlaneGeometry(defs[d].w, CHUNK_LEN, 1, defs[d].segs);
+      g.rotateX(-Math.PI / 2);
+      const p = g.getAttribute('position') as THREE.BufferAttribute;
+      const xs = new Float32Array(p.count), zs = new Float32Array(p.count);
+      for (let i = 0; i < p.count; i++) { xs[i] = p.getX(i); zs[i] = p.getZ(i); }
+      this.xs.push(xs); this.zs.push(zs);
+      g.dispose(); // шаблон не нужен — клонируем геометрию на каждый слот
+    }
+    for (let s = 0; s < chunks; s++) {
+      const row: THREE.Mesh[] = [];
+      for (let d = 0; d < defs.length; d++) {
+        const geo = new THREE.PlaneGeometry(defs[d].w, CHUNK_LEN, 1, defs[d].segs);
+        geo.rotateX(-Math.PI / 2);
+        const m = new THREE.Mesh(geo, defs[d].mat);
+        m.frustumCulled = false;
+        scene.add(m);
+        row.push(m);
+      }
+      this.meshes.push(row);
+    }
+  }
+  write(slot: number, chunkZ: number) {
+    const zc = chunkZ + STRIP_ZMID;
+    const row = this.meshes[slot];
+    for (let d = 0; d < this.defs.length; d++) {
+      const def = this.defs[d];
+      const m = row[d];
+      const p = m.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const xs = this.xs[d], zs = this.zs[d];
+      for (let i = 0; i < p.count; i++) {
+        const wz = zc + zs[i];
+        p.setY(i, this.hAt(wz) + def.yOff);
+        p.setX(i, xs[i] + this.cAt(wz));
+      }
+      p.needsUpdate = true;
+      m.geometry.computeVertexNormals();
+      m.position.set(def.x, 0, zc);
+    }
+  }
+  dispose() {
+    for (const row of this.meshes) for (const m of row) m.geometry.dispose();
+  }
+}
+
 // --- чанк улицы -----------------------------------------------------------
 
 interface Chunk {
-  group: THREE.Group;
   /** Индекс чанка по дороге (z = -index * CHUNK_LEN). */
   index: number;
-  lampHeads: THREE.Vector3[]; // локальные позиции головок для пула света
+  /** Физический слот 0..CHUNKS-1 — диапазон инстансов в каждом пуле (не меняется). */
+  slot: number;
+  lampHeads: THREE.Vector3[]; // МИРОВЫЕ позиции головок для пула света
 }
 
 export class World {
@@ -203,16 +358,11 @@ export class World {
   private poleGeo = new THREE.CylinderGeometry(0.07, 0.1, 5.4, 6);
   private headGeo = new THREE.BoxGeometry(0.5, 0.16, 0.22);
   private coneGeo = new THREE.ConeGeometry(2.6, 4.8, 12, 1, true);
-  // неон-билборды у дороги — кислотный свет, ловится блумом
-  private billboardGeo = new THREE.PlaneGeometry(4.6, 2.5);
-  private billboardMats = [0xff3bd0, 0x22ffee, 0x66ff66, 0xff8a3c, 0xff3b6b].map(
-    (c) => new THREE.MeshBasicMaterial({ color: c, toneMapped: false, side: THREE.DoubleSide }),
-  );
-  // эстакада над дорогой: бетонный настил + опоры
-  private bridgeGeo = new THREE.BoxGeometry(ROAD_W + 8, 1.3, 4.5);
-  private bridgeMat = new THREE.MeshLambertMaterial({ color: 0x2a2c31 });
-  private pillarGeo = new THREE.CylinderGeometry(0.5, 0.6, 8, 8);
-  // зимний двор: ели, голые деревья, гаражи, киоски, остановки
+  // плоские, прижатые к земле геометрии для инстансов (рельеф снимаем позицией)
+  private lineGeo = (() => { const g = new THREE.PlaneGeometry(0.14, 2.6); g.rotateX(-Math.PI / 2); return g; })();
+  private glowGeo = (() => { const g = new THREE.PlaneGeometry(8.5, 11); g.rotateX(-Math.PI / 2); return g; })();
+  private patchGeo = (() => { const g = new THREE.PlaneGeometry(1, 1); g.rotateX(-Math.PI / 2); return g; })();
+  // зимний двор: ели, голые деревья, гаражи, киоски
   private firGeo = new THREE.ConeGeometry(1.5, 3.6, 7);
   private firMat = new THREE.MeshLambertMaterial({ color: 0x1d2b22 });
   private firSnowGeo = new THREE.ConeGeometry(1.1, 1.6, 7);
@@ -222,9 +372,7 @@ export class World {
   private crownGeo = new THREE.IcosahedronGeometry(1.1, 0);
   private crownMat = new THREE.MeshLambertMaterial({ color: 0x191d1a });
   private garageGeo = new THREE.BoxGeometry(3.4, 2.6, 6.2);
-  private garageMats = [0x4a4440, 0x3f4a44, 0x54504a, 0x44424c].map(
-    (c) => new THREE.MeshLambertMaterial({ color: c }),
-  );
+  private garageMat = new THREE.MeshLambertMaterial({ color: 0xffffff }); // цвет — per-instance
   private garageDoorGeo = new THREE.PlaneGeometry(2.6, 2.1);
   private garageDoorMat = new THREE.MeshLambertMaterial({ color: 0x2e2c29 });
   private kioskGeo = new THREE.BoxGeometry(2.6, 2.4, 2.2);
@@ -238,7 +386,18 @@ export class World {
     color: 0xdfe8ff, emissive: 0xbcd0ff, emissiveIntensity: 1.1,
   });
   private vazColors = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
-  private sharedGeos: Set<THREE.BufferGeometry>;
+  private garageColors = [0x4a4440, 0x3f4a44, 0x54504a, 0x44424c];
+  // пулы инстансов и групп
+  private pools: InstancePool[] = [];
+  private pLine!: InstancePool; private pPole!: InstancePool; private pHead!: InstancePool;
+  private pCone!: InstancePool; private pGlow!: InstancePool; private pPatch!: InstancePool;
+  private pFir!: InstancePool; private pFirSnow!: InstancePool;
+  private pTrunk!: InstancePool; private pCrown!: InstancePool;
+  private pGarage!: InstancePool; private pGarageDoor!: InstancePool;
+  private pKiosk!: InstancePool; private pKioskWin!: InstancePool;
+  private pBuild!: InstancePool[]; // по виду дома
+  private gCar!: GroupPool; private gStop!: GroupPool;
+  private strips!: StripPool; // дорога/земля/обочины/тротуары
   private pooled: THREE.SpotLight[] = [];
   // переиспользуемый пул позиций ближних фонарей — без аллокаций/sort в кадре
   private headPool: THREE.Vector3[] = [];
@@ -258,12 +417,6 @@ export class World {
     theme: WorldTheme = THEMES[0],
   ) {
     this.theme = theme;
-    this.sharedGeos = new Set([
-      this.boxGeo, this.poleGeo, this.headGeo, this.coneGeo,
-      this.firGeo, this.firSnowGeo, this.trunkGeo, this.crownGeo,
-      this.garageGeo, this.garageDoorGeo, this.kioskGeo, this.kioskWinGeo,
-      this.billboardGeo, this.bridgeGeo, this.pillarGeo,
-    ]);
 
     const base = IS_MOBILE ? 700 : 1600;
     this.SNOW_N = theme.precip === 'clear' ? Math.round(base * 0.25) : base;
@@ -289,6 +442,42 @@ export class World {
       buildingKind(24, 18, 20, 4, 6, '#3a3833', 0.12), // промздание — тёмное, редкие окна
     ];
 
+    // --- создаём пулы инстансов (один draw call на тип на ВСЕ чанки) ---
+    const C = CHUNKS;
+    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material | THREE.Material[], per: number, colored = false) => {
+      const p = new InstancePool(geo, mat, per, C, this.scene, colored);
+      this.pools.push(p);
+      return p;
+    };
+    this.pLine = mk(this.lineGeo, this.lineMat, 12);
+    this.pPole = mk(this.poleGeo, this.poleMat, 4);
+    this.pHead = mk(this.headGeo, this.lampHeadMat, 4);
+    this.pCone = mk(this.coneGeo, this.coneMat, 4);
+    this.pGlow = mk(this.glowGeo, this.poolMat, 4);
+    this.pPatch = mk(this.patchGeo, this.snowPatchMat, 8);
+    this.pFir = mk(this.firGeo, this.firMat, 12);
+    this.pFirSnow = mk(this.firSnowGeo, this.firSnowMat, 12);
+    this.pTrunk = mk(this.trunkGeo, this.trunkMat, 12);
+    this.pCrown = mk(this.crownGeo, this.crownMat, 12);
+    this.pGarage = mk(this.garageGeo, this.garageMat, 6, true);
+    this.pGarageDoor = mk(this.garageDoorGeo, this.garageDoorMat, 6);
+    this.pKiosk = mk(this.kioskGeo, this.kioskMat, 2);
+    this.pKioskWin = mk(this.kioskWinGeo, this.kioskWinMat, 2);
+    this.pBuild = this.kinds.map((k) => mk(this.boxGeo, k.mats, 10));
+    this.gCar = new GroupPool(
+      () => buildCar({ color: this.vazColors[Math.floor(Math.random() * this.vazColors.length)], lightsOn: false }),
+      2, C, this.scene,
+    );
+    this.gStop = new GroupPool(() => this.makeStop(), 1, C, this.scene);
+    this.strips = new StripPool([
+      { w: 500, mat: this.groundMat, x: 0, yOff: -0.14, segs: 16 }, // земля до домов
+      { w: ROAD_W, mat: this.roadMat, x: 0, yOff: 0, segs: 16 },
+      { w: 2.4, mat: this.shoulderMat, x: -(ROAD_W / 2 + 1.2), yOff: 0.012, segs: 16 },
+      { w: 2.4, mat: this.shoulderMat, x: ROAD_W / 2 + 1.2, yOff: 0.012, segs: 16 },
+      { w: 3.4, mat: this.sidewalkMat, x: -(ROAD_W / 2 + 2.4 + 1.7), yOff: 0.06, segs: 16 },
+      { w: 3.4, mat: this.sidewalkMat, x: ROAD_W / 2 + 2.4 + 1.7, yOff: 0.06, segs: 16 },
+    ], C, this.scene, this.hAt, this.cAt);
+
     for (let i = 0; i < POOLED_LIGHTS; i++) {
       // конус вниз, угол как у видимого плафона: atan(2.6 / 4.8) ≈ 0.5 рад —
       // машина освещается только когда реально въезжает в пятно фонаря
@@ -311,9 +500,29 @@ export class World {
       }),
     ];
 
-    for (let i = 0; i < CHUNKS; i++) this.chunks.push(this.makeChunk(i));
+    for (let i = 0; i < CHUNKS; i++) {
+      const c: Chunk = { index: i, slot: i, lampHeads: [] };
+      this.writeChunk(c);
+      this.chunks.push(c);
+    }
+    for (const p of this.pools) p.flush();
 
     this.buildSnow();
+  }
+
+  /** Остановка: задняя стенка, крыша, лавка, холодная лампа (общие материалы). */
+  private makeStop(): THREE.Group {
+    const stop = new THREE.Group();
+    const back = new THREE.Mesh(new THREE.BoxGeometry(4, 2.0, 0.14), this.stopWallMat);
+    back.position.set(0, 1.2, 0.7);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.12, 1.8), this.stopWallMat);
+    roof.position.set(0, 2.25, 0);
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(3, 0.09, 0.5), this.stopWallMat);
+    bench.position.set(0, 0.55, 0.45);
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.2), this.stopLightMat);
+    lamp.position.set(0, 2.16, 0);
+    stop.add(back, roof, bench, lamp);
+    return stop;
   }
 
   /** Пульс эмиссивов по доле (env 0..1) — окна/фонари «дышат» в бит. */
@@ -375,105 +584,93 @@ export class World {
   }
 
   /**
-   * Полоса вдоль дороги, повторяющая рельеф. Локальный z геометрии
-   * симметричен (±len/2); zWorldCenter — мировой z центра полосы.
+   * Записать наполнение чанка в его слот всех пулов (МИРОВЫЕ координаты).
+   * Вызывается на старте и при переезде (recycle) — только setMatrixAt, без
+   * создания/уничтожения объектов. Неиспользованные слоты прячутся.
    */
-  private stripGeo(w: number, len: number, segs: number, zWorldCenter: number, yOff: number): THREE.PlaneGeometry {
-    const g = new THREE.PlaneGeometry(w, len, 1, segs);
-    g.rotateX(-Math.PI / 2);
-    const p = g.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < p.count; i++) {
-      const wz = zWorldCenter + p.getZ(i);
-      p.setY(i, this.hAt(wz) + yOff);
-      p.setX(i, p.getX(i) + this.cAt(wz)); // полоса следует поворотам
-    }
-    g.computeVertexNormals();
-    return g;
-  }
-
-  private makeChunk(index: number): Chunk {
-    const group = new THREE.Group();
+  private writeChunk(chunk: Chunk) {
+    const { slot, index } = chunk;
     const chunkZ = -index * CHUNK_LEN;
-    const zMid = -CHUNK_LEN / 2; // локальный центр чанка
-    const lampHeads: THREE.Vector3[] = [];
-    const bm = BIOMES[this.biomeIdx]; // биом-сет: какие здания/декор и как часто
+    const bm = BIOMES[this.biomeIdx];
+    chunk.lampHeads.length = 0;
 
-    const strip = (w: number, mat: THREE.Material, x: number, yOff: number, segs = 16) => {
-      const m = new THREE.Mesh(this.stripGeo(w, CHUNK_LEN, segs, chunkZ + zMid, yOff), mat);
-      m.position.set(x, 0, zMid);
-      group.add(m);
-      return m;
+    // полотно дороги/земли/обочин/тротуаров (следует рельефу)
+    this.strips.write(slot, chunkZ);
+
+    // курсоры записи по каждому пулу (в пределах слота)
+    const cur = new Map<InstancePool, number>();
+    const put = (
+      p: InstancePool, x: number, y: number, z: number,
+      ry = 0, sx = 1, sy = 1, sz = 1, color?: number,
+    ) => {
+      const c = cur.get(p) ?? 0;
+      if (c >= p.perChunk) return; // переполнение слота — лишнее не рисуем
+      p.set(slot * p.perChunk + c, x, y, z, ry, sx, sy, sz, color);
+      cur.set(p, c + 1);
     };
-
-    strip(500, this.groundMat, 0, -0.14, 16); // земля до домов
-    strip(ROAD_W, this.roadMat, 0, 0, 16);
-    for (const s of [-1, 1]) {
-      strip(2.4, this.shoulderMat, s * (ROAD_W / 2 + 1.2), 0.012);
-      strip(3.4, this.sidewalkMat, s * (ROAD_W / 2 + 2.4 + 1.7), 0.06);
-    }
 
     // прерывистая осевая, местами стёртая
     for (let z = 2; z < CHUNK_LEN; z += 6) {
       if (Math.random() < 0.2) continue;
-      const line = new THREE.Mesh(this.stripGeo(0.14, 2.6, 2, chunkZ - z, 0.03), this.lineMat);
-      line.position.set(0, 0, -z);
-      group.add(line);
+      const wz = chunkZ - z;
+      put(this.pLine, this.cAt(wz), this.hAt(wz) + 0.03, wz);
     }
 
     // пятна снега на обочинах
     for (let i = 0; i < 7; i++) {
       const s = Math.random() < 0.5 ? -1 : 1;
-      const z = -Math.random() * CHUNK_LEN;
-      const patch = new THREE.Mesh(
-        this.stripGeo(0.8 + Math.random() * 2.2, 1.2 + Math.random() * 3, 2, chunkZ + z, 0.075),
-        this.snowPatchMat,
-      );
-      patch.position.set(s * (ROAD_W / 2 + 0.6 + Math.random() * 4.5), 0, z);
-      group.add(patch);
+      const wz = chunkZ - Math.random() * CHUNK_LEN;
+      const sxw = 0.8 + Math.random() * 2.2, szl = 1.2 + Math.random() * 3;
+      put(this.pPatch, s * (ROAD_W / 2 + 0.6 + Math.random() * 4.5) + this.cAt(wz),
+        this.hAt(wz) + 0.075, wz, 0, sxw, 1, szl);
     }
 
     // фонари в шахматном порядке
     for (let z = LAMP_SPACING / 2; z < CHUNK_LEN; z += LAMP_SPACING) {
       const s = (Math.floor(z / LAMP_SPACING) + index) % 2 === 0 ? -1 : 1;
-      const cx = this.cAt(chunkZ - z);
+      const wz = chunkZ - z;
+      const cx = this.cAt(wz);
       const x = s * (ROAD_W / 2 + 0.9) + cx;
       const hx = x - s * 0.55; // головка нависает над дорогой
-      const h = this.hAt(chunkZ - z);
-      const pole = new THREE.Mesh(this.poleGeo, this.poleMat);
-      pole.position.set(x, h + 2.7, -z);
-      const head = new THREE.Mesh(this.headGeo, this.lampHeadMat);
-      head.position.set(hx, h + 5.35, -z);
-      const cone = new THREE.Mesh(this.coneGeo, this.coneMat);
-      cone.position.set(hx, h + 3.0, -z);
-      // глоу-пятно «как блик», статичное под фонарём, повторяет рельеф
-      // (stripGeo сам добавляет кривизну — x-офсет без неё)
-      const pool = new THREE.Mesh(this.stripGeo(8.5, 11, 4, chunkZ - z, 0.05), this.poolMat);
-      pool.position.set(hx - cx, 0, -z);
-      group.add(pole, head, cone, pool);
-      lampHeads.push(new THREE.Vector3(hx, h + 5.1, -z));
+      const h = this.hAt(wz);
+      put(this.pPole, x, h + 2.7, wz);
+      put(this.pHead, hx, h + 5.35, wz);
+      put(this.pCone, hx, h + 3.0, wz);
+      put(this.pGlow, hx, h + 0.05, wz);
+      chunk.lampHeads.push(new THREE.Vector3(hx, h + 5.1, wz));
     }
 
     // панельки по сторонам. В провинц-режиме отсекаем высотку(4)/ТЦ(5) —
     // промздание(6) провинциальное, остаётся.
     const kinds = SHOW_URBAN ? bm.kinds : bm.kinds.filter((k) => k !== 4 && k !== 5);
+    const buildCur = new Map<number, number>(); // курсор по виду дома
     for (const s of [-1, 1]) {
       let z = -Math.random() * 14;
       while (z > -CHUNK_LEN) {
-        const kind = this.kinds[kinds[Math.floor(Math.random() * kinds.length)]];
+        const ki = kinds[Math.floor(Math.random() * kinds.length)];
+        const kind = this.kinds[ki];
         const rot = Math.random() < 0.4 ? Math.PI / 2 : 0;
         const w = rot ? kind.d : kind.w, d = rot ? kind.w : kind.d;
-        const b = new THREE.Mesh(this.boxGeo, kind.mats);
-        b.scale.set(kind.w, kind.h, kind.d);
-        b.rotation.y = rot;
         const zc = z - w / 2;
-        b.position.set(
-          s * (ROAD_W / 2 + 8 + d / 2 + Math.random() * 14) + this.cAt(chunkZ + zc),
-          this.hAt(chunkZ + zc) + kind.h / 2 - 1, // чуть утоплены в рельеф
-          zc,
-        );
-        group.add(b);
+        const wz = chunkZ + zc;
+        const pool = this.pBuild[ki];
+        const c = buildCur.get(ki) ?? 0;
+        if (c < pool.perChunk) {
+          pool.set(
+            slot * pool.perChunk + c,
+            s * (ROAD_W / 2 + 8 + d / 2 + Math.random() * 14) + this.cAt(wz),
+            this.hAt(wz) + kind.h / 2 - 1, // чуть утоплены в рельеф
+            wz, rot, kind.w, kind.h, kind.d,
+          );
+          buildCur.set(ki, c + 1);
+        }
         z -= w + 6 + Math.random() * 18;
       }
+    }
+    // спрятать незаполненные слоты домов
+    for (let ki = 0; ki < this.pBuild.length; ki++) {
+      const pool = this.pBuild[ki];
+      for (let c = buildCur.get(ki) ?? 0; c < pool.perChunk; c++) pool.hide(slot * pool.perChunk + c);
     }
 
     // деревья вдоль тротуаров и во дворах: ели со снегом + голые (густота по биому)
@@ -482,38 +679,16 @@ export class World {
       while (z > -CHUNK_LEN) {
         z -= 9 + Math.random() * 16;
         if (Math.random() >= bm.tree) continue; // густота деревьев — по биому
-        const x = s * (ROAD_W / 2 + 6 + Math.random() * 16) + this.cAt(chunkZ + z);
-        const h = this.hAt(chunkZ + z);
+        const wz = chunkZ + z;
+        const x = s * (ROAD_W / 2 + 6 + Math.random() * 16) + this.cAt(wz);
+        const h = this.hAt(wz);
         if (Math.random() < bm.fir) {
-          const fir = new THREE.Mesh(this.firGeo, this.firMat);
-          fir.position.set(x, h + 1.8, z);
-          const cap = new THREE.Mesh(this.firSnowGeo, this.firSnowMat);
-          cap.position.set(x, h + 3.0, z);
-          group.add(fir, cap);
+          put(this.pFir, x, h + 1.8, wz);
+          put(this.pFirSnow, x, h + 3.0, wz);
         } else {
-          const trunk = new THREE.Mesh(this.trunkGeo, this.trunkMat);
-          trunk.position.set(x, h + 1.2, z);
-          const crown = new THREE.Mesh(this.crownGeo, this.crownMat);
-          crown.scale.set(1, 0.8 + Math.random() * 0.5, 1);
-          crown.position.set(x, h + 2.7, z);
-          group.add(trunk, crown);
+          put(this.pTrunk, x, h + 1.2, wz);
+          put(this.pCrown, x, h + 2.7, wz, 0, 1, 0.8 + Math.random() * 0.5, 1);
         }
-      }
-    }
-
-    // эстакада/арка над дорогой — проезжаешь под мостом (бетон + опоры).
-    // Скрыта в провинц-режиме (ломает сеттинг 90х), геометрия/материалы целы.
-    if (SHOW_URBAN && Math.random() < bm.bridge) {
-      const z = -8 - Math.random() * (CHUNK_LEN - 16);
-      const cx = this.cAt(chunkZ + z);
-      const h = this.hAt(chunkZ + z);
-      const deck = new THREE.Mesh(this.bridgeGeo, this.bridgeMat);
-      deck.position.set(cx, h + 7.5, z);
-      group.add(deck);
-      for (const s of [-1, 1]) {
-        const pil = new THREE.Mesh(this.pillarGeo, this.bridgeMat);
-        pil.position.set(cx + s * (ROAD_W / 2 + 2.5), h + 3.5, z);
-        group.add(pil);
       }
     }
 
@@ -524,93 +699,62 @@ export class World {
       const n = 3 + Math.floor(Math.random() * 4);
       for (let g = 0; g < n; g++) {
         const z = z0 - g * 3.6;
-        const x = s * (ROAD_W / 2 + 17 + Math.random() * 2) + this.cAt(chunkZ + z);
-        const box = new THREE.Mesh(
-          this.garageGeo, this.garageMats[Math.floor(Math.random() * this.garageMats.length)],
-        );
-        box.rotation.y = Math.PI / 2;
-        box.position.set(x, this.hAt(chunkZ + z) + 1.25, z);
-        const door = new THREE.Mesh(this.garageDoorGeo, this.garageDoorMat);
-        door.rotation.y = -s * Math.PI / 2;
-        door.position.set(x - s * 3.15, this.hAt(chunkZ + z) + 1.05, z);
-        group.add(box, door);
+        const wz = chunkZ + z;
+        const x = s * (ROAD_W / 2 + 17 + Math.random() * 2) + this.cAt(wz);
+        const h = this.hAt(wz);
+        put(this.pGarage, x, h + 1.25, wz, Math.PI / 2, 1, 1, 1,
+          this.garageColors[Math.floor(Math.random() * this.garageColors.length)]);
+        put(this.pGarageDoor, x - s * 3.15, h + 1.05, wz, -s * Math.PI / 2);
       }
-    }
-
-    // неон-билборд на столбе у дороги, лицом к трассе — кислотный акцент.
-    // Скрыт в провинц-режиме (ломает сеттинг 90х), геометрия/материалы целы.
-    if (SHOW_URBAN && Math.random() < bm.billboard) {
-      const s = Math.random() < 0.5 ? -1 : 1;
-      const z = -Math.random() * CHUNK_LEN;
-      const x = s * (ROAD_W / 2 + 5) + this.cAt(chunkZ + z);
-      const h = this.hAt(chunkZ + z);
-      const post = new THREE.Mesh(this.poleGeo, this.poleMat);
-      post.position.set(x, h + 2.7, z);
-      const board = new THREE.Mesh(
-        this.billboardGeo, this.billboardMats[Math.floor(Math.random() * this.billboardMats.length)],
-      );
-      board.position.set(x, h + 5.5, z);
-      board.rotation.y = s * 0.5; // лицом к подъезжающему водителю, чуть к центру дороги
-      group.add(post, board);
     }
 
     // киоск с тёплой витриной
     if (Math.random() < bm.kiosk) {
       const s = Math.random() < 0.5 ? -1 : 1;
-      const z = -Math.random() * CHUNK_LEN;
-      const x = s * (ROAD_W / 2 + 7.5) + this.cAt(chunkZ + z);
-      const h = this.hAt(chunkZ + z);
-      const kiosk = new THREE.Mesh(this.kioskGeo, this.kioskMat);
-      kiosk.position.set(x, h + 1.2, z);
-      const win = new THREE.Mesh(this.kioskWinGeo, this.kioskWinMat);
-      win.rotation.y = -s * Math.PI / 2;
-      win.position.set(x - s * 1.31, h + 1.35, z);
-      group.add(kiosk, win);
+      const wz = chunkZ - Math.random() * CHUNK_LEN;
+      const x = s * (ROAD_W / 2 + 7.5) + this.cAt(wz);
+      const h = this.hAt(wz);
+      put(this.pKiosk, x, h + 1.2, wz);
+      put(this.pKioskWin, x - s * 1.31, h + 1.35, wz, -s * Math.PI / 2);
     }
 
-    // остановка: задняя стенка, крыша, лавка, холодная лампа
-    if (Math.random() < bm.stop) {
-      const s = Math.random() < 0.5 ? -1 : 1;
-      const z = -10 - Math.random() * (CHUNK_LEN - 20);
-      const bx = s * (ROAD_W / 2 + 4.6) + this.cAt(chunkZ + z);
-      const h = this.hAt(chunkZ + z);
-      const stop = new THREE.Group();
-      const back = new THREE.Mesh(new THREE.BoxGeometry(4, 2.0, 0.14), this.stopWallMat);
-      back.position.set(0, 1.2, s * 0.7);
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.12, 1.8), this.stopWallMat);
-      roof.position.set(0, 2.25, 0);
-      const bench = new THREE.Mesh(new THREE.BoxGeometry(3, 0.09, 0.5), this.stopWallMat);
-      bench.position.set(0, 0.55, s * 0.45);
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.2), this.stopLightMat);
-      lamp.position.set(0, 2.16, 0);
-      stop.add(back, roof, bench, lamp);
-      stop.position.set(bx, h, z);
-      group.add(stop);
-    }
-
-    // припаркованные жигули у обочины, фары потушены
-    if (Math.random() < bm.parked) {
-      const n = 1 + (Math.random() < 0.3 ? 1 : 0);
-      for (let p = 0; p < n; p++) {
+    // остановка (переиспользуемая группа)
+    {
+      const stopG = this.gStop.at(slot, 0);
+      if (Math.random() < bm.stop) {
         const s = Math.random() < 0.5 ? -1 : 1;
-        const z = -Math.random() * CHUNK_LEN;
-        const parked = buildCar({
-          color: this.vazColors[Math.floor(Math.random() * this.vazColors.length)],
-          lightsOn: false,
-        });
-        parked.position.set(
-          s * (ROAD_W / 2 + 1.6) + this.cAt(chunkZ + z),
-          this.hAt(chunkZ + z),
-          z,
-        );
-        parked.rotation.y = (Math.random() < 0.85 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.06;
-        group.add(parked);
+        const wz = chunkZ - 10 - Math.random() * (CHUNK_LEN - 20);
+        stopG.position.set(s * (ROAD_W / 2 + 4.6) + this.cAt(wz), this.hAt(wz), wz);
+        // задняя стенка/лавка на сторону дороги: масштаб по z отражает сторону
+        stopG.scale.z = s;
+        stopG.visible = true;
+      } else stopG.visible = false;
+    }
+
+    // припаркованные жигули у обочины (переиспользуемые группы)
+    {
+      const n = Math.random() < bm.parked ? 1 + (Math.random() < 0.3 ? 1 : 0) : 0;
+      for (let p = 0; p < this.gCar.perChunk; p++) {
+        const carG = this.gCar.at(slot, p);
+        if (p < n) {
+          const s = Math.random() < 0.5 ? -1 : 1;
+          const wz = chunkZ - Math.random() * CHUNK_LEN;
+          carG.position.set(s * (ROAD_W / 2 + 1.6) + this.cAt(wz), this.hAt(wz), wz);
+          carG.rotation.y = (Math.random() < 0.85 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.06;
+          carG.visible = true;
+        } else carG.visible = false;
       }
     }
 
-    group.position.z = chunkZ;
-    this.scene.add(group);
-    return { group, index, lampHeads };
+    // прятать незаполненные слоты остальных пулов
+    for (const p of this.pools) {
+      if (p === this.pLine || p === this.pPatch || p === this.pPole || p === this.pHead
+        || p === this.pCone || p === this.pGlow || p === this.pFir || p === this.pFirSnow
+        || p === this.pTrunk || p === this.pCrown || p === this.pGarage || p === this.pGarageDoor
+        || p === this.pKiosk || p === this.pKioskWin) {
+        for (let c = cur.get(p) ?? 0; c < p.perChunk; c++) p.hide(slot * p.perChunk + c);
+      }
+    }
   }
 
   /**
@@ -623,42 +767,36 @@ export class World {
   }
 
   /**
-   * Пересобрать все чанки на их текущих индексах. Нужно, когда геометрия
+   * Перезаписать все чанки на их текущих индексах. Нужно, когда геометрия
    * (heightAt/curveAt) сменилась после конструктора — напр., в endless мир
    * строится со заглушкой, а после привязки цепочки дорогу надо перестроить.
    */
   rebuild() {
-    for (const c of this.chunks) this.recycle(c, c.index);
-  }
-
-  /** Пересобрать наполнение чанка под новый индекс (переезд вперёд). */
-  private recycle(chunk: Chunk, newIndex: number) {
-    this.scene.remove(chunk.group);
-    chunk.group.traverse((o) => {
-      if (o instanceof THREE.Mesh && !this.sharedGeos.has(o.geometry)) o.geometry.dispose();
-    });
-    const fresh = this.makeChunk(newIndex);
-    chunk.group = fresh.group;
-    chunk.index = newIndex;
-    chunk.lampHeads = fresh.lampHeads;
+    for (const c of this.chunks) this.writeChunk(c);
+    for (const p of this.pools) p.flush();
   }
 
   update(dt: number, carPos: THREE.Vector3, pulseDepth = 0) {
     // #16/#A глубину пульса (окна/фонари дышат в бит) считает дирижёр (канал
     // worldPulse, гейтирован состоянием): в холодном затишье ≈0 → мир НЕПОДВИЖЕН.
     this.pulse(pulseDepth);
-    // переезд чанков
+    // переезд чанков — перезапись слота под новый индекс (ноль аллокаций)
+    let recycled = false;
     for (const c of this.chunks) {
-      if (-c.index * CHUNK_LEN - CHUNK_LEN > carPos.z + CHUNK_LEN * 1.5)
-        this.recycle(c, c.index + CHUNKS);
+      if (-c.index * CHUNK_LEN - CHUNK_LEN > carPos.z + CHUNK_LEN * 1.5) {
+        c.index += CHUNKS;
+        this.writeChunk(c);
+        recycled = true;
+      }
     }
+    if (recycled) for (const p of this.pools) p.flush();
 
     // пул SpotLight — к ближайшим фонарям вокруг машины.
     // собираем кандидатов в переиспользуемый пул (без new Vector3 в кадре)
     let hc = 0;
     for (const c of this.chunks)
       for (const h of c.lampHeads) {
-        const wz = h.z + c.group.position.z;
+        const wz = h.z; // lampHeads уже в мировых координатах
         if (wz < carPos.z + 12 && wz > carPos.z - 60) {
           let v = this.headPool[hc];
           if (!v) { v = new THREE.Vector3(); this.headPool[hc] = v; }
@@ -717,8 +855,10 @@ export class World {
   }
 
   dispose() {
-    this.scene.traverse((o) => {
-      if (o instanceof THREE.Mesh || o instanceof THREE.Points) o.geometry.dispose();
-    });
+    for (const p of this.pools) p.dispose();
+    this.gCar.dispose();
+    this.gStop.dispose();
+    this.strips.dispose();
+    if (this.snow) this.snow.geometry.dispose();
   }
 }
