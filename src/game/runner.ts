@@ -17,6 +17,7 @@ export class Runner {
   private legL: THREE.Group; private legR: THREE.Group;
   private torso: THREE.Group;
   private stepIndex = 0; // индекс последнего приземления стопы — для звука шага
+  private faceTex: THREE.Texture; // лицо Кейджа на голове (для dispose)
 
   constructor() {
     const skin = new THREE.MeshStandardMaterial({ color: 0xddae8a, roughness: 0.75, flatShading: true });
@@ -34,11 +35,24 @@ export class Runner {
     this.torso = new THREE.Group();
     const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.78, 0.28), skin);
     trunk.position.y = 1.18;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), skin);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 16, 12), skin);
     head.position.y = 1.74;
+    // ЛИЦО НИКОЛАСА КЕЙДЖА (public/cage.png — вырезанное лицо, прозрачный фон):
+    // «налеплено» на перёд головы плоскостью с alpha-cutout, смотрит в -Z (туда же,
+    // куда идёт человечек). MeshBasic — лицо видно ночью без освещения.
+    this.faceTex = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}cage.png`);
+    this.faceTex.colorSpace = THREE.SRGBColorSpace;
+    const faceMat = new THREE.MeshStandardMaterial({
+      map: this.faceTex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide,
+      roughness: 0.85, metalness: 0,
+      emissive: 0xffffff, emissiveMap: this.faceTex, emissiveIntensity: 0.45, // видно ночью, но не «лампа»
+    });
+    const face = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.47), faceMat); // ~аспект 348×482
+    face.position.set(0, 1.76, -0.225); // чуть ПЕРЕД поверхностью шара (radius .21), чтобы не утопал
+    face.rotation.y = Math.PI;        // нормаль в -Z (к фронтальной камере)
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.09, 0.14, 6), skin);
     neck.position.y = 1.56;
-    this.torso.add(trunk, neck, head);
+    this.torso.add(trunk, neck, head, face);
 
     this.armL = limb(0.14, 0.72, 0.32, 1.48);
     this.armR = limb(0.14, 0.72, -0.32, 1.48);
@@ -92,5 +106,6 @@ export class Runner {
     this.group.traverse((o) => {
       if (o instanceof THREE.Mesh) { o.geometry.dispose(); (o.material as THREE.Material).dispose(); }
     });
+    this.faceTex.dispose();
   }
 }

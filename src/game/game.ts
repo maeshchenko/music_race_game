@@ -140,6 +140,11 @@ export class Game {
   // роща/озеро — Firewatch-управление: ходьба клавишами + свободный mouse-look
   private walkMode = false;      // дистанцию ведут шаги (W), не аудио
   private walkDist = 0;          // накопленная пешая дистанция
+  private walkHintCleared = false; // подсказка pin выключена при первом движении
+  private idleT = 0;       // сек бездействия в пешем режиме
+  private idleStage = 0;   // 0 ничего · 1 маяк ярче · 2 мягкая реплика · 3 явные клавиши
+  private idleReset = false; // ввод в этом кадре → сброс лестницы
+  private beacon: THREE.PointLight | null = null;
   private frozen = false;        // озеро: движение остановлено (сидишь)
   private runnerLift = 0;        // подъём человечка на камень в конце тропы (плавный)
   private playSec = 0;           // суммарное время игры (для титров «прошли за N минут»)
@@ -153,6 +158,9 @@ export class Game {
   private crashSide = 1;         // в какую сторону уносит машину при крахе
   private crashDist = 0;         // дистанция апекса поворота-аварии
   private crashArmed = false;    // резкий поворот перед аварией уже включён (виден на подъезде)
+  private foreshadowIdx = 0;
+  private foreshadowBump = 0;    // transient всплеск insanity для foreshadow (не клобберится покадровым setInsanity)
+  private static readonly FORESHADOW_AT = [1500, 2800]; // м: тонкие «волны» до подъезда
   private approachStarted = false; // подъезд к аварии: поле + зима наступают
   private approachFromTheme: WorldTheme | null = null; // тема, ИЗ которой к зиме
   private zonesSet = false;      // пешие зоны по дистанции включены (бесшовные переходы)
@@ -436,6 +444,7 @@ export class Game {
     if (Game.isFwd(e)) this.keyFwd = true;
     if (Game.isLeft(e)) this.keyLeft = true;
     if (Game.isRight(e)) this.keyRight = true;
+    if (Game.isFwd(e) || Game.isLeft(e) || Game.isRight(e)) this.idleReset = true;
     // C — переключить вид: в гонке салон/снаружи, пешком — 3-е лицо/1-е лицо (тест)
     if (e.code === 'KeyC') {
       if (this.walkMode) this.fpDebug = !this.fpDebug;
@@ -527,24 +536,39 @@ export class Game {
     for (const el of [
       this.hud, this.feverEdge, this.comboBar, this.comboRingWrap,
       this.odBar, this.odIcon, this.odPrompt, this.turboFx, this.goalEl,
-    ]) { if (el) el.style.display = 'none'; }
+    ]) {
+      if (!el) continue;
+      el.style.transition = 'opacity .8s ease';
+      el.style.opacity = '0';
+      setTimeout(() => { if (!this.disposed) el.style.display = 'none'; }, 850);
+    }
   }
 
-  private walkHint: HTMLDivElement | null = null;
-  /** Аккуратная подсказка слева-сверху после аварии: чем двигаться. Сама гаснет. */
-  private showWalkHint() {
-    if (this.walkHint) return;
-    const el = document.createElement('div');
-    el.textContent = 'Движение — WASD или стрелки';
-    el.style.cssText = 'position:absolute;top:14px;left:16px;z-index:8;pointer-events:none;'
-      + 'padding:.45rem .7rem;border-radius:10px;background:rgba(12,16,22,.5);'
-      + 'color:#dfe6f2;font:600 14px/1 system-ui,sans-serif;text-shadow:0 1px 3px #000;'
-      + 'backdrop-filter:blur(4px);transition:opacity 1.2s;opacity:0';
-    this.fx.appendChild(el);
-    this.walkHint = el;
-    requestAnimationFrame(() => { if (this.walkHint) this.walkHint.style.opacity = '1'; });
-    // научили — через ~12 c мягко убираем, чтобы не мешать созерцанию
-    setTimeout(() => { if (this.walkHint) this.walkHint.style.opacity = '0'; }, 12000);
+  private letterbox: HTMLDivElement | null = null;
+  private letterboxShown = false;
+  /** Кино-полосы (top+bottom): сигнал «катсцена, откинься». Въезжают перед апексом. */
+  private showLetterbox() {
+    if (this.letterbox) return;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:absolute;inset:0;z-index:9;pointer-events:none';
+    const bar = (top: boolean) =>
+      `position:absolute;left:0;right:0;${top ? 'top' : 'bottom'}:0;height:0;`
+      + 'background:#000;transition:height 1s ease';
+    const t = document.createElement('div'); t.style.cssText = bar(true);
+    const b = document.createElement('div'); b.style.cssText = bar(false);
+    wrap.appendChild(t); wrap.appendChild(b);
+    this.fx.appendChild(wrap);
+    this.letterbox = wrap;
+    requestAnimationFrame(() => {
+      if (this.letterbox) { t.style.height = '11%'; b.style.height = '11%'; }
+    });
+  }
+  /** Полосы уезжают (вернулось пешее управление). */
+  private hideLetterbox() {
+    if (!this.letterbox) return;
+    const wrap = this.letterbox; this.letterbox = null;
+    for (const c of Array.from(wrap.children)) (c as HTMLDivElement).style.height = '0';
+    setTimeout(() => { if (!this.disposed) wrap.remove(); }, 1100);
   }
 
   /** #14 тактильная отдача (мобайл/поддерживающие устройства) — no-op иначе. */
@@ -992,6 +1016,7 @@ export class Game {
   }
 
   private onMouse = (e: MouseEvent) => {
+    this.idleReset = true;
     if (this.walkMode) {
       // пеший режим: мышь ВРАЩАЕТ камеру вокруг человечка (орбита), не руль.
       // Под pointer-lock — по дельте; без него — по позиции курсора.
@@ -1236,6 +1261,10 @@ export class Game {
       if (!this.paused && !this.frozen && this.keyFwd) {
         this.walkDist += 5.0 * dt; // только ВПЕРЁД (W); назад нельзя — A/D дают стрейф
       }
+      if (!this.walkHintCleared && (this.keyFwd || this.keyLeft || this.keyRight)) {
+        this.walkHintCleared = true;
+        this.narrator?.clear();
+      }
       dist = this.walkDist;
     } else {
       dist = this.level.distAt(t);
@@ -1265,6 +1294,10 @@ export class Game {
       if (this.approachStarted && this.approachFromTheme) {
         const k = THREE.MathUtils.clamp(1 - m / 450, 0, 1);
         this.world.applyThemeColors(lerpTheme(this.approachFromTheme, WINTER, k));
+      }
+      if (this.crashArmed && !this.letterboxShown && m > 0 && m < 40) {
+        this.letterboxShown = true;
+        this.showLetterbox();
       }
     }
 
@@ -1304,6 +1337,13 @@ export class Game {
       const st = this.story.tick(storyDist, THEMES[this.themeIndex]);
       this.storyCam = st.camera;
       this.frozen = st.freeze;
+      // FORESHADOW: тонкие ранние «волны» — учим словарь «что-то не так».
+      if (!this.story.active && !this.walkMode
+          && this.foreshadowIdx < Game.FORESHADOW_AT.length
+          && dist >= Game.FORESHADOW_AT[this.foreshadowIdx]) {
+        this.foreshadowIdx++;
+        this.foreshadowBump = 0.22;                      // лёгкий всплеск; спадает в setInsanity ниже
+      }
       // БЕСШОВНОСТЬ: пропы зон выбираются ПО ДИСТАНЦИИ (world.setZones), цвета/туман
       // лерпятся (applyThemeColors), небо переключаем явно — без мгновенной подмены.
       if ((st.enteredPhase === 'forest' || st.enteredPhase === 'grove' || st.enteredPhase === 'lake')
@@ -1336,13 +1376,19 @@ export class Game {
         this.haptic([40, 80, 160]);
         if (!this.runner) { this.runner = new Runner(); this.world.scene.add(this.runner.group); }
         this.hideRaceHud();              // гоночный HUD (очки/скорость/комбо/ускорение) убрать — дальше другая игра
-        this.showWalkHint();             // аккуратно слева-сверху: чем двигаться (само гаснет)
         this.walkMode = true;            // дистанцию дальше ведут шаги (после краша)
         this.walkDist = this.crashDist;  // СТАРТ строго на входе в лес (не аудио-дист → нет перелёта в озеро)
         this.lookYaw = 0; this.lookPitch = 0; // орбита по умолчанию — сзади, чуть сверху
         if (!this.ambient) this.ambient = new NightAmbient();
         this.ambient.fadeTo(0.85, 10);   // ночной амбиент проступает
         this.conductor?.beginDescent();  // фиксируем уровень музыки — дальше уводим её вдаль по шагам
+        if (!this.beacon) {
+          const lakeStart = this.story.zoneStarts()[2];
+          const bx = this.level.curveAt(lakeStart);
+          this.beacon = new THREE.PointLight(0xffd9a0, 0, 220, 1.6); // тёплый, distance 220
+          this.beacon.position.set(bx, this.groundY(lakeStart) + 6, -lakeStart);
+          this.world.scene.add(this.beacon);
+        }
       }
       // НЕПРЕРЫВНЫЙ УВОД МУЗЫКИ ВДАЛЬ: пока идём по лесу — музыка тише+медленнее с
       // каждым шагом (привязка к ДИСТАНЦИИ, не к таймеру: стоишь — замерла). К роще
@@ -1354,11 +1400,34 @@ export class Game {
           this.conductor?.setDescent(p);
         }
       }
+      // ЛЕСТНИЦА ПОДСКАЗОК ПРИ БЕЗДЕЙСТВИИ (anti-Navi: сброс на любой ввод).
+      if (this.walkMode && !this.frozen && !this.walkHintCleared) {
+        if (this.idleReset) { this.idleT = 0; this.idleStage = 0; this.idleReset = false; }
+        else this.idleT += dt;
+        if (this.idleStage < 1 && this.idleT >= 10) this.idleStage = 1; // маяк ярче (Task 5)
+        if (this.idleStage < 2 && this.idleT >= 20) {
+          this.idleStage = 2; this.narrator?.clear(); this.narrator?.say('Здесь больше ничего. Иди в лес.');
+        }
+        if (this.idleStage < 3 && this.idleT >= 35) {
+          this.idleStage = 3; this.narrator?.clear(); this.narrator?.say('Нажми W или ↑ — идти.');
+        }
+      } else {
+        this.idleReset = false; // не копим ввод вне пешей фазы
+      }
+      // МАЯК: яркость зависит от бездействия (idleStage), гаснет на берегу (frozen)
+      if (this.beacon) {
+        const want = this.idleStage >= 1 ? 3.2 : 1.1; // ярче, если игрок завис
+        this.beacon.intensity += (want - this.beacon.intensity) * Math.min(1, dt * 1.5);
+      }
+      if (this.beacon && this.frozen) {
+        this.beacon.intensity += (0 - this.beacon.intensity) * Math.min(1, dt * 1.5);
+      }
       if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-80, 4); // добиваем в тишину (страховка)
       if (st.enteredPhase === 'lake') this.ambient?.setWater(0.9, 6);     // у озера добавляем воду
       // на колёсной фазе (race) — в машине; на пеших — пешком
       this.onFoot = st.camera !== 'chase';
-      this.director.setInsanity(st.insanity);
+      if (this.foreshadowBump > 0) this.foreshadowBump = Math.max(0, this.foreshadowBump - dt * 0.4); // спад ~0.5с
+      this.director.setInsanity(Math.max(st.insanity, this.foreshadowBump)); // foreshadow-всплеск не теряется
       // темп на гонке ведёт story; в пешем спуске им владеет setDescent (плавно вниз)
       if (st.rateChanged && !this.walkMode) this.conductor?.setRate(st.audioRate, 3);
       // реплики не сыплем во время самой аварии — только когда уже стоишь/идёшь
@@ -1419,7 +1488,8 @@ export class Game {
       this.world.clearCrashBend(); // дальше пешая тропа без виража-аварии
       if (this.endless && this.chain) this.chain.clearCrashBend();
       else this.traffic.clearCrashBend();
-      this.pop('⌨ WASD — ИДТИ · МЫШЬ — КАМЕРА · C — ВИД', 'pop-theme pop-mega');
+      this.narrator?.pin('Иди вперёд — W · мышь — оглядеться');
+      this.hideLetterbox();
     }
 
     // мировая позиция человечка на ПЕТЛЯЮЩЕЙ тропе. Тропа (world.cAt) вьётся во ВСЕХ
