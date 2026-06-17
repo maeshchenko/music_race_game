@@ -144,6 +144,7 @@ export class Game {
   private runnerLift = 0;        // подъём человечка на камень в конце тропы (плавный)
   private playSec = 0;           // суммарное время игры (для титров «прошли за N минут»)
   private creditsShown = false;  // финальные титры уже запущены
+  private replayPromptShown = false; // нарратор переключился с поздравления на выбор Y/N
   private lookYaw = 0;           // свободный осмотр: поворот (рад)
   private lookPitch = 0;         // свободный осмотр: наклон (рад)
   private keyFwd = false;
@@ -420,7 +421,7 @@ export class Game {
 
   private onKey = (e: KeyboardEvent) => {
     // ФИНАЛ (титры на берегу): Y — сыграть ещё раз (с сюжетом), N — обычная гонка
-    if (this.creditsShown && this.frozen) {
+    if (this.replayPromptShown && this.frozen) {
       // Y/N — и латиница, и кириллица (Y=н, N=т на ЙЦУКЕН)
       if (e.code === 'KeyY' || e.key === 'н' || e.key === 'Н') { this.onReplay?.(true); return; }
       if (e.code === 'KeyN' || e.key === 'т' || e.key === 'Т') { this.onReplay?.(false); return; }
@@ -1278,7 +1279,12 @@ export class Game {
           'Сделано с любовью.',
           'Мижган.',
         ]);
-        // закреплённая подсказка управления (не гаснет) — выбор финала
+        // сначала — поздравление от нарратора; висит, пока титры едут над морем
+        this.narrator?.pin('Поздравляю, ты победил!');
+      }
+      // титры проехали (~13 с) — нарратор меняет реплику на выбор финала
+      if (this.creditsShown && !this.replayPromptShown && this.sitTime >= 18) {
+        this.replayPromptShown = true;
         this.narrator?.pin('Нажми Y — сыграть ещё раз · N — обычная гонка');
       }
       const storyDist = this.frozen ? this.walkDist + this.sitTime * 2.5 : dist;
@@ -1323,9 +1329,10 @@ export class Game {
         this.ambient.fadeTo(0.85, 10);   // ночной амбиент проступает
         this.conductor?.duckMusic(-22, 10);
       }
-      // углубляемся: музыка тает дальше, на озере добавляем воду
-      if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-34, 8);
-      if (st.enteredPhase === 'lake') { this.ambient?.setWater(0.9, 6); this.conductor?.duckMusic(-52, 10); }
+      // углубляемся: музыка тает в ноль — к роще (светлячки) её уже нет, только
+      // ночной амбиент (он идёт мимо мастера). На озере добавляем воду.
+      if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-80, 8);
+      if (st.enteredPhase === 'lake') { this.ambient?.setWater(0.9, 6); this.conductor?.duckMusic(-80, 10); }
       // на колёсной фазе (race) — в машине; на пеших — пешком
       this.onFoot = st.camera !== 'chase';
       this.director.setInsanity(st.insanity);
