@@ -103,6 +103,7 @@ let results: HTMLDivElement | null = null;
 let replayRequested = false; // «ЕЩЁ РАЗ» — не перегенерировать трек
 let nextSong: Song | null = null; // следующий трек: генерится в фоне во время заезда
 let firstEndlessRun = true; // первая трасса сессии: всегда снежная ночь + граймран
+let storyEnabled = true; // сюжетный спуск (авария→лес→озеро); N в финале → false (обычная гонка)
 let countdownTimer = 0;
 let conductor: Conductor | null = null; // бесконечный сет: общий транспорт
 // дельты для пер-сегментной награды (ноты/XP начисляются на каждом стыке)
@@ -392,8 +393,14 @@ async function startEndless() {
   game = new Game(app, song, STUB_LEVEL, null, diff, audioOffsetMs / 1000,
     { gold, mystery: luckyRun ? 3 : 2, lucky: luckyRun, best: loadBest()?.score ?? 0,
       carColor: meta.skinColor, theme },
-    { conductor, nextSong: nextEndlessSong });
+    { conductor, nextSong: nextEndlessSong, story: storyEnabled });
   game.onSegment = onSegmentDone; // тикер + награда на каждом стыке
+  // финал на берегу: Y — заново (с сюжетом), N — обычная безлимитная гонка без аварии
+  game.onReplay = (withStory: boolean) => {
+    storyEnabled = withStory;
+    teardownRide();
+    void startEndless();
+  };
   setLoader(65, 'настраиваем звук…');
   await nextPaint();
   await Tone.start();
