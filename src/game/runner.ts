@@ -16,6 +16,7 @@ export class Runner {
   private armL: THREE.Group; private armR: THREE.Group;
   private legL: THREE.Group; private legR: THREE.Group;
   private torso: THREE.Group;
+  private stepIndex = 0; // индекс последнего приземления стопы — для звука шага
 
   constructor() {
     const skin = new THREE.MeshStandardMaterial({ color: 0xddae8a, roughness: 0.75, flatShading: true });
@@ -53,8 +54,10 @@ export class Runner {
   /**
    * Анимация бега. dist — дистанция (м): фаза шага = dist·k, поэтому ноги
    * «отталкиваются» синхронно с землёй. speed (м/с) — амплитуда/подскок.
+   * Возвращает true в кадре, когда стопа КАСАЕТСЯ земли (для звука шага); стоим
+   * (speed≈0) — всегда false.
    */
-  update(dist: number, speed: number) {
+  update(dist: number, speed: number): boolean {
     if (speed <= 0.01) {
       // СТОИТ РОВНО (берег/freeze): конечности по швам, корпус прямой, без подскока —
       // спокойная стойка, а не «замер посреди шага»
@@ -63,7 +66,7 @@ export class Runner {
       this.body.position.y = 0;
       this.body.rotation.x = 0; // убрать беговой наклон вперёд
       this.torso.rotation.z = 0;
-      return;
+      return false;
     }
     this.body.rotation.x = 0.12; // беговой наклон корпуса (на ходу)
     const phase = dist * 1.15; // циклов на метр → шаг привязан к дороге
@@ -78,6 +81,11 @@ export class Runner {
     this.body.position.y = Math.abs(Math.cos(phase)) * amp * 0.12;
     // лёгкое раскачивание плеч
     this.torso.rotation.z = sw * 0.05;
+    // ПРИЗЕМЛЕНИЕ стопы: тело в нижней точке (|cos|→0) на фазах π/2+nπ — две
+    // опоры за цикл. Индекс растёт на 1 на каждом касании → звук ровно по ноге.
+    const idx = Math.floor(phase / Math.PI - 0.5);
+    if (idx !== this.stepIndex) { this.stepIndex = idx; return true; }
+    return false;
   }
 
   dispose() {

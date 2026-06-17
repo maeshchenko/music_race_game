@@ -375,6 +375,7 @@ export class Game {
     this.renderer.domElement.addEventListener('mousedown', this.onMouseDown);
     addEventListener('mouseup', this.onMouseUp);
     addEventListener('keyup', this.onKeyUp);
+    addEventListener('blur', this.onBlur);
     // палец = руль: абсолютная позиция по ширине экрана
     this.renderer.domElement.addEventListener('touchstart', this.onTouch, { passive: false });
     this.renderer.domElement.addEventListener('touchmove', this.onTouch, { passive: false });
@@ -418,6 +419,10 @@ export class Game {
     if (Game.isLeft(e)) this.keyLeft = false;
     if (Game.isRight(e)) this.keyRight = false;
   };
+
+  // потеря фокуса (alt-tab, СМЕНА РАСКЛАДКИ) может «съесть» keyup → клавиша
+  // залипает. Сбрасываем движение, чтобы ходьба не зависала/не ехала сама.
+  private onBlur = () => { this.keyFwd = this.keyLeft = this.keyRight = false; this.nosHeld = false; };
 
   private onKey = (e: KeyboardEvent) => {
     // ФИНАЛ (титры на берегу): Y — сыграть ещё раз (с сюжетом), N — обычная гонка
@@ -1249,6 +1254,10 @@ export class Game {
         this.approachFromTheme = THEMES[this.themeIndex];
         this.world.setApproachField(this.crashDist, 450); // район = поле, дорога 2 полосы
         this.world.setCrashBend(this.crashDist, this.crashSide);
+        // поток едет по той же изогнутой дороге (endless: трафик в сегментах цепочки)
+        if (this.endless && this.chain) this.chain.setCrashBend(this.crashDist, this.crashSide);
+        else this.traffic.setCrashBend(this.crashDist, this.crashSide);
+
         this.world.applyThemeColors(WINTER); // precip → снег
         this.world.refreshPrecip();
       }
@@ -1269,15 +1278,19 @@ export class Game {
       // всплывают титры (благодарность + время прохождения).
       if (this.frozen && !this.creditsShown && this.sitTime >= 5) {
         this.creditsShown = true;
-        const m = Math.max(1, Math.round(this.playSec / 60));
-        const mod10 = m % 10, mod100 = m % 100;
-        const word = (mod10 === 1 && mod100 !== 11) ? 'минуту'
-          : (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) ? 'минуты' : 'минут';
+        // склонение русского числительного (1 минуту / 2 минуты / 5 минут и т.п.)
+        const plural = (n: number, one: string, few: string, many: string) => {
+          const d10 = n % 10, d100 = n % 100;
+          return (d10 === 1 && d100 !== 11) ? one
+            : (d10 >= 2 && d10 <= 4 && !(d100 >= 12 && d100 <= 14)) ? few : many;
+        };
+        const m = Math.max(1, Math.round(this.playSec / 60)); // реальное время от старта (мимо пауз)
+        const y = this.collected; // собранных кубиков за всю игру
         this.world.showCredits([
           'Спасибо за игру!',
-          `вы прошли её за ${m} ${word}`,
-          'Сделано с любовью.',
-          'Мижган.',
+          `ты прошёл её за ${m} ${plural(m, 'минуту', 'минуты', 'минут')}`,
+          `и собрал ${y} ${plural(y, 'кубик', 'кубика', 'кубиков')}`,
+          'Сделано Мижганом',
         ]);
         // сначала — поздравление от нарратора; висит, пока титры едут над морем
         this.narrator?.pin('Поздравляю, ты победил!');
@@ -1314,6 +1327,8 @@ export class Game {
           this.crashArmed = true;
           this.crashDist = dist; this.crashSide = Math.random() < 0.5 ? -1 : 1;
           this.world.setCrashBend(this.crashDist, this.crashSide);
+          if (this.endless && this.chain) this.chain.setCrashBend(this.crashDist, this.crashSide);
+          else this.traffic.setCrashBend(this.crashDist, this.crashSide);
         }
         this.crashUntil = t + 3.6;
         this.flash('#ffffff');
@@ -1327,16 +1342,25 @@ export class Game {
         this.lookYaw = 0; this.lookPitch = 0; // орбита по умолчанию — сзади, чуть сверху
         if (!this.ambient) this.ambient = new NightAmbient();
         this.ambient.fadeTo(0.85, 10);   // ночной амбиент проступает
-        this.conductor?.duckMusic(-22, 10);
+        this.conductor?.beginDescent();  // фиксируем уровень музыки — дальше уводим её вдаль по шагам
       }
-      // углубляемся: музыка тает в ноль — к роще (светлячки) её уже нет, только
-      // ночной амбиент (он идёт мимо мастера). На озере добавляем воду.
-      if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-80, 8);
-      if (st.enteredPhase === 'lake') { this.ambient?.setWater(0.9, 6); this.conductor?.duckMusic(-80, 10); }
+      // НЕПРЕРЫВНЫЙ УВОД МУЗЫКИ ВДАЛЬ: пока идём по лесу — музыка тише+медленнее с
+      // каждым шагом (привязка к ДИСТАНЦИИ, не к таймеру: стоишь — замерла). К роще
+      // (светлячки) музыки уже нет — только ночной амбиент (он идёт мимо мастера).
+      if (this.walkMode) {
+        const [zf, zg] = this.story.zoneStarts(); // старт леса, старт рощи
+        if (this.walkDist < zg) {
+          const p = THREE.MathUtils.clamp((this.walkDist - zf) / Math.max(1, zg - zf), 0, 1);
+          this.conductor?.setDescent(p);
+        }
+      }
+      if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-80, 4); // добиваем в тишину (страховка)
+      if (st.enteredPhase === 'lake') this.ambient?.setWater(0.9, 6);     // у озера добавляем воду
       // на колёсной фазе (race) — в машине; на пеших — пешком
       this.onFoot = st.camera !== 'chase';
       this.director.setInsanity(st.insanity);
-      if (st.rateChanged) this.conductor?.setRate(st.audioRate, 3); // плавное замедление
+      // темп на гонке ведёт story; в пешем спуске им владеет setDescent (плавно вниз)
+      if (st.rateChanged && !this.walkMode) this.conductor?.setRate(st.audioRate, 3);
       // реплики не сыплем во время самой аварии — только когда уже стоишь/идёшь
       if (!(this.crashUntil > 0 && t < this.crashUntil)) {
         const line = this.story.pendingNarration(storyDist);
@@ -1389,6 +1413,8 @@ export class Game {
       this.wreckPos.y += 1.4;
       this.wreckYaw = this.car.rotation.y;
       this.world.clearCrashBend(); // дальше пешая тропа без виража-аварии
+      if (this.endless && this.chain) this.chain.clearCrashBend();
+      else this.traffic.clearCrashBend();
       this.pop('⌨ WASD — ИДТИ · МЫШЬ — КАМЕРА · C — ВИД', 'pop-theme pop-mega');
     }
 
@@ -1440,7 +1466,8 @@ export class Game {
         this.runner.group.visible = !this.fpDebug;
         this.runner.group.position.set(charX, y + this.runnerLift, -dist);
         this.runner.group.rotation.set(0, heading, 0);
-        this.runner.update(dist, this.keyFwd && !this.frozen ? 5.0 : 0);
+        // звук шага ровно на касание стопы (runner вернёт true в этот кадр)
+        if (this.runner.update(dist, this.keyFwd && !this.frozen ? 5.0 : 0)) this.sfx.footstep();
       } else if (this.runner) this.runner.group.visible = false;
 
       // --- камера (вне аварии) ---
@@ -1823,6 +1850,7 @@ export class Game {
     this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
     removeEventListener('mouseup', this.onMouseUp);
     removeEventListener('keyup', this.onKeyUp);
+    removeEventListener('blur', this.onBlur);
     if (this.pointerLocked) document.exitPointerLock();
     if (this.endless && this.chain) this.chain.dispose();
     else { this.blocks.dispose(); this.traffic.dispose(); }

@@ -973,7 +973,8 @@ export class World {
       // ЛЕНТА ТРОПЫ: слабый эмиссив полотна (лес/роща) — тропа светится в темноте,
       // видно куда идти; в гонке/прочих темах pathGlow нет → не светится
       this.roadMat.emissive.setHex(theme.pathGlow ?? 0x000000);
-      this.roadMat.emissiveIntensity = theme.pathGlow ? 1 : 0;
+      // мягкое свечение изнутри (не ядрёная неон-лента) — еле тлеет, ведёт взгляд
+      this.roadMat.emissiveIntensity = theme.pathGlow ? 0.35 : 0;
       if (this.lakeWater && theme.water !== undefined) {
         (this.lakeWater.material as THREE.MeshStandardMaterial).color.setHex(theme.water);
       }
@@ -991,7 +992,7 @@ export class World {
     if (id === 'forest') {
       // лес: ВИДИМАЯ грунтовая дорога (светлая, подсвечена) + мшистый пол по бокам.
       // Дорога петляет (weaving) — деревья идут вдоль неё.
-      this.roadMat.color.setHex(0x4a3a22); this.roadMat.roughness = 1; // грунтовка — светлее пола
+      this.roadMat.color.setHex(0x282013); this.roadMat.roughness = 1; // тёмная грунтовка (ближе к асфальту), светится изнутри
       this.groundMat.color.setHex(0x223428); // мшистый пол (видно при лунном hemi)
       this.shoulderMat.color.setHex(0x3a2e1a);
       this.sidewalkMat.color.setHex(0x223428);
@@ -1015,13 +1016,13 @@ export class World {
       this.sidewalkMat.color.setHex(0x3a5a48);
     } else if (id === 'grove') {
       // роща: та же видимая грунтовая дорога (петляет), пол синее/живее под сиянием
-      this.roadMat.color.setHex(0x4a3e26); this.roadMat.roughness = 1; // грунтовка
+      this.roadMat.color.setHex(0x282215); this.roadMat.roughness = 1; // тёмная грунтовка, светится изнутри
       this.groundMat.color.setHex(0x223440); // мшисто-синий пол
       this.shoulderMat.color.setHex(0x3a3220);
       this.sidewalkMat.color.setHex(0x223440);
     } else if (id === 'lake') {
       // озеро: тропа-берег (видна) + «земля» вокруг = вода, осветлённая под луной
-      this.roadMat.color.setHex(0x39402c); this.roadMat.roughness = 1; // песчаный берег
+      this.roadMat.color.setHex(0x232619); this.roadMat.roughness = 1; // тёмный песчаный берег, светится изнутри
       this.groundMat.color.setHex(0x12283e); // лунная гладь воды (видно)
       this.shoulderMat.color.setHex(0x333a28);
       this.sidewalkMat.color.setHex(0x12283e);

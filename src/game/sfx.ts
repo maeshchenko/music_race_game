@@ -62,8 +62,11 @@ export class Sfx {
   private kick: Tone.MembraneSynth; // бух на сильную долю — пульс трека
   private bass: Tone.Synth; // дубль басовой ноты
   private snare: Tone.NoiseSynth; // щелчок бэкбита
+  private step: Tone.NoiseSynth;  // шаг по грунту: короткий глухой шум-всплеск
+  private stepFilter: Tone.Filter; // lowpass — мягкий грунт, без верхней «песчаной» резкости
   private lastKickAt = 0;
   private lastSnareAt = 0;
+  private lastStepAt = 0;
   // общий тон-бас сбора: lowpass + малый reverb → пул/бас сидят В миксе, не поверх.
   // kick/snare/thud идут сухими мимо него (панч/читаемость удара).
   private filter: Tone.Filter;
@@ -100,6 +103,10 @@ export class Sfx {
     this.kick.volume.value = -8 + db;
     this.bass.volume.value = -12 + db;
     this.snare.volume.value = -18 + db;
+    // шаги идут МИМО мастера → компенсируем его уровнем, чтобы абсолютная
+    // громкость шагов = уровню SFX (offset+мастер) и НЕ глохла при спуске
+    const masterDb = Tone.getDestination().volume.value;
+    this.step.volume.value = -14 + db + masterDb; // тихий, но слышный «туп» по земле
   }
 
   constructor() {
@@ -136,6 +143,19 @@ export class Sfx {
       envelope: { attack: 0.001, decay: 0.07, sustain: 0, release: 0.02 },
       volume: -18,
     }).toDestination();
+    // ШАГ ПО ГРУНТУ: коричневый шум (глухой, мягкий) сквозь lowpass → короткий
+    // «туп». Без тональности, мимо тон-баса — это не музыкальное событие.
+    // ВАЖНО: шаги идут МИМО мастера (как ночной амбиент). На спуске мы рампим
+    // мастер-громкость в тишину (setDescent) — через .toDestination() шаги
+    // глохли бы вместе с музыкой. Роутим в raw-выход контекста.
+    this.stepFilter = new Tone.Filter({ type: 'lowpass', frequency: 1500, Q: 0.8 });
+    const rawDest = (Tone.getContext().rawContext as AudioContext)?.destination;
+    if (rawDest) this.stepFilter.connect(rawDest); else this.stepFilter.toDestination();
+    this.step = new Tone.NoiseSynth({
+      noise: { type: 'pink' },
+      envelope: { attack: 0.002, decay: 0.09, sustain: 0, release: 0.03 },
+      volume: -14,
+    }).connect(this.stepFilter);
   }
 
   /**
@@ -277,6 +297,21 @@ export class Sfx {
     this.kick.triggerAttackRelease('G0', 0.5, now + 0.02, 0.8);
   }
 
+  /**
+   * Тихий шаг по грунту — зовётся на КАЖДОЕ приземление стопы (из runner по
+   * фазе анимации). Каждый шаг чуть разный (срез/спад/громкость) — чтобы не
+   * звучало «пулемётом». Стоим — runner не зовёт, тишина.
+   */
+  footstep() {
+    const ts = performance.now();
+    if (ts - this.lastStepAt < 90) return; // дубль-гард (макс ~11 шагов/с)
+    this.lastStepAt = ts;
+    const dec = 0.07 + Math.random() * 0.05;        // спад 70..120 мс
+    this.stepFilter.frequency.value = 1200 + Math.random() * 700; // глухость варьируется
+    this.step.envelope.decay = dec;
+    this.step.triggerAttackRelease(dec, this.soon(), 0.28 + Math.random() * 0.14);
+  }
+
   /** Удар о преграду: низкий глухой бум. */
   crash() {
     const now = this.soon();
@@ -290,6 +325,8 @@ export class Sfx {
     this.kick.dispose();
     this.bass.dispose();
     this.snare.dispose();
+    this.step.dispose();
+    this.stepFilter.dispose();
     this.filter.dispose();
     this.verb.dispose();
   }

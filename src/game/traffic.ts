@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { buildCar, SHARED_CAR_GEOS } from './car';
-import { laneOffset, availableLanes } from './road';
+import { laneOffset, availableLanes, crashBend } from './road';
 import type { Level } from './level';
 import type { Blocks } from './blocks';
 import type { Difficulty } from './blocks';
@@ -54,6 +54,23 @@ export class Traffic {
    * на харде), низкая убирает лишние (не справляешься — меньше преград).
    */
   setIntensity(x: number) { this.intensity = Math.max(0, Math.min(1, x)); }
+
+  // резкий поворот-авария: поток ДОЛЖЕН ехать по той же изогнутой дороге, что и
+  // полотно (world), иначе машины «летят прямо сквозь лес». Те же center/side.
+  // bendOffset — сдвиг сегмента (endless): локальная дист + offset = глобальная,
+  // в которой world считает изгиб; для одиночного трафика offset=0.
+  private crashBendOn = false; private crashBendCenter = 0; private crashBendSide = 1;
+  private bendOffset = 0;
+  setCrashBend(center: number, side: number, distOffset = 0) {
+    this.crashBendOn = true; this.crashBendCenter = center; this.crashBendSide = side;
+    this.bendOffset = distOffset;
+  }
+  clearCrashBend() { this.crashBendOn = false; }
+  /** Ось пути с учётом поворота-аварии (совпадает с world.cAt в ГЛОБАЛЬНОЙ дист). */
+  private pathX(pos: number, level: Level): number {
+    return level.curveAt(pos)
+      + (this.crashBendOn ? crashBend(pos + this.bendOffset, this.crashBendCenter, this.crashBendSide) : 0);
+  }
 
   constructor(level: Level, blocks: Blocks, diff: Difficulty) {
     const [iMin, iMax] = DIFF_INTERVAL[diff];
@@ -128,11 +145,11 @@ export class Traffic {
       const visible = pos > carDist - 35 && pos < carDist + 220;
       o.group.visible = visible;
       if (!visible) continue;
-      const x = level.curveAt(pos) + laneOffset(o.lane, level.wideAt(pos));
+      const x = this.pathX(pos, level) + laneOffset(o.lane, level.wideAt(pos));
       const y = level.heightAt(pos) + (o.kind === 'pile' ? 0.35 : 0);
       o.group.position.set(x, y, -pos);
       if (o.kind !== 'pile') {
-        const dir = (level.curveAt(pos + 2) - level.curveAt(pos - 2)) / 4;
+        const dir = (this.pathX(pos + 2, level) - this.pathX(pos - 2, level)) / 4;
         o.group.rotation.y = -Math.atan(dir) + (o.kind === 'oncoming' ? Math.PI : 0);
       }
       const dz = Math.abs(pos - carDist);

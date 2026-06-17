@@ -125,6 +125,7 @@ export class EndlessChain implements Level {
       tEnd: tOffset + level.durationSec,
       retired: false,
     };
+    if (this.bendOn) traffic.setCrashBend(this.bendCenter, this.bendSide, distOffset);
     this.segments.push(seg);
     return seg;
   }
@@ -137,6 +138,18 @@ export class EndlessChain implements Level {
   /** Активные (не снятые) сегменты — Game обходит их для блоков/трафика. */
   active(): Segment[] {
     return this.segments.filter((s) => !s.retired);
+  }
+
+  // поворот-авария: раздаём изгиб трафику ВСЕХ сегментов в их ГЛОБАЛЬНОЙ дист
+  // (locaml + distOffset). Запоминаем — новые сегменты получат его при append.
+  private bendOn = false; private bendCenter = 0; private bendSide = 1;
+  setCrashBend(center: number, side: number) {
+    this.bendOn = true; this.bendCenter = center; this.bendSide = side;
+    for (const s of this.segments) s.traffic.setCrashBend(center, side, s.distOffset);
+  }
+  clearCrashBend() {
+    this.bendOn = false;
+    for (const s of this.segments) s.traffic.clearCrashBend();
   }
 
   /** Подвесить следующий, завести/снять аудио, снять отъехавшие. Каждый кадр. */

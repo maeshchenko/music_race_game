@@ -220,6 +220,37 @@ export class Conductor {
     catch { /* безопасно пропустить */ }
   }
 
+  private descStarted = false;
+  private descCurDb = 0;   // сглаженный текущий уровень (чтобы переход не щёлкал)
+  private descCurRate = 1; // сглаженный текущий темп
+
+  /** Старт сюр-спуска (момент аварии). СРАЗУ начинаем уводить музыку из
+   *  «гоночной» громкости/темпа в глухой ночной уровень — не бьёт по уху. */
+  beginDescent() {
+    try { this.descCurDb = Tone.getDestination().volume.value; } catch { this.descCurDb = 0; }
+    try { this.descCurRate = this.transport.bpm.value / BASE_BPM; } catch { this.descCurRate = 1; }
+    this.descStarted = true;
+  }
+
+  /**
+   * Сюр-спуск: увести музыку «вдаль» по прогрессу p∈[0..1] (0 — сразу после
+   * аварии: уже ТИШЕ и МЕДЛЕННЕЕ гонки; 1 — полная тишина у светлячков).
+   * Зовётся ПОКАДРОВО из game.ts, привязано к пройденному пути (шагам): стоишь —
+   * музыка замерла на текущем уровне, идёшь — уплывает. Значения СГЛАЖИВАЕМ к
+   * цели (без рамп-гонок и без щелчка на переходе с гоночного уровня).
+   */
+  setDescent(p: number) {
+    if (!this.descStarted) return;
+    const k = p <= 0 ? 0 : p >= 1 ? 1 : p;
+    // уже на p=0 музыка приглушена (−16 дБ) и медленнее (×0.6); к p=1 — тишина (×0.4)
+    const targetDb = k >= 1 ? -80 : -16 + (-80 - (-16)) * k;
+    const targetRate = 0.6 - k * 0.2;
+    this.descCurDb += (targetDb - this.descCurDb) * 0.08;       // ~0.2с сглаживание громкости
+    this.descCurRate += (targetRate - this.descCurRate) * 0.06; // ~0.3с сглаживание темпа
+    try { Tone.getDestination().volume.value = this.descCurDb; } catch { /* мимо */ }
+    try { this.transport.bpm.value = BASE_BPM * this.descCurRate; } catch { /* мимо */ }
+  }
+
   /**
    * Глобальная позиция в ПЕСЕННЫХ секундах (тики/tps) — инвариант к темпу:
    * под турбо тики идут быстрее, песенное время растёт быстрее, всё синхронно.
