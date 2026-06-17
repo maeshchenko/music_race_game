@@ -483,7 +483,7 @@ export class Game {
     const ease = (x: number) => 1 - (1 - x) * (1 - x); // easeOutQuad
     const launchX = cx + this.carX;
     const fwd = ease(p) * 26;                        // едем ПРЯМО (дорога ушла в поворот — мы нет)
-    const sideX = -this.crashSide * ease(p) * 13;    // сносит НА ВНЕШНЮЮ сторону поворота, в деревья
+    const sideX = -this.crashSide * ease(p) * 16;    // сносит НА ВНЕШНЮЮ сторону поворота, в деревья
     const arc = Math.sin(p * Math.PI) * 2.6                       // подброс
       + Math.max(0, Math.sin(p * 13)) * (1 - p) * 0.8;           // отскоки
     this.car.visible = true;
@@ -1407,11 +1407,15 @@ export class Game {
     if (this.crashUntil > 0 && !crashing && !this.wrecked) {
       this.wrecked = true;
       this.crashUntil = -1;
-      this.wreckPos.copy(this.car.position);
-      // перевёрнутая машина «крышей» уходит на ~1.4 м вниз (кузов высотой ~1.42,
-      // ориджин у колёс) → поднимаем обломок, чтобы он лежал НА земле, не тонул
-      this.wreckPos.y += 1.4;
+      // ОБЛОМОК кладём ДЕТЕРМИНИРОВАННО — гарантированно СБОКУ от петляющей тропы
+      // (а не там, где закончился кувырок: тропа вьётся и подходит к нему вплотную
+      // → модели клипуют). Берём точку тропы в месте схода + сдвиг во ВНЕШНЮЮ сторону
+      // (в деревья) → человечек стартует «немного рядом», без пересечения моделей.
+      const wd = this.crashDist;
+      const wpathX = this.level.curveAt(wd) + this.carX + trailWeave(wd);
+      this.wreckPos.set(wpathX + -this.crashSide * 7, this.groundY(wd) + 1.4, -wd);
       this.wreckYaw = this.car.rotation.y;
+      this.flash('#ffffff'); // короткая вспышка маскирует «оседание» обломка на место
       this.world.clearCrashBend(); // дальше пешая тропа без виража-аварии
       if (this.endless && this.chain) this.chain.clearCrashBend();
       else this.traffic.clearCrashBend();
