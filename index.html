@@ -129,6 +129,24 @@
       /* #45 климакс-переход: полноэкранная вспышка + тройная ударная волна +
          слэм-текст + сабтайтл. Это не «финиш», а хайп-дроп — гоним дальше. */
       .finale-fx { position: absolute; inset: 0; z-index: 7; pointer-events: none; overflow: hidden; }
+      /* МЯГКИЙ стык трека: аккуратная надпись сверху, без вуали/вспышки — не рвёт поток */
+      .finale-soft {
+        position: absolute; left: 0; right: 0; top: 12%; text-align: center;
+        z-index: 7; pointer-events: none; animation: finale-soft 2.9s ease-out forwards;
+      }
+      .finale-soft .t {
+        font: 800 clamp(20px, 3.4vw, 38px)/1.1 system-ui, sans-serif; color: #fff;
+        text-shadow: 0 0 16px #ffba5a, 0 2px 8px #000; letter-spacing: 0.04em;
+      }
+      .finale-soft .s {
+        margin-top: 0.35rem; font: 700 clamp(13px, 1.9vw, 20px)/1.2 system-ui, sans-serif;
+        color: #ffd98a; text-shadow: 0 0 12px #ff9a4c, 0 2px 6px #000; letter-spacing: 0.06em;
+      }
+      @keyframes finale-soft {
+        0% { opacity: 0; transform: translateY(-10px); }
+        10% { opacity: 1; transform: translateY(0); }
+        75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-6px); }
+      }
       .finale-veil {
         position: absolute; inset: 0; background: #fff;
         animation: finale-veil 0.55s ease-out forwards;

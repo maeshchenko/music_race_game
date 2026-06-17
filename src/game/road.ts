@@ -89,6 +89,31 @@ export const availableLanes = (w: number): number[] => (w >= 0.5 ? [-1, 0, 1] : 
 /** Предел руля (|x|) — машина держится в пределах проезжей части. */
 export const steerRange = (w: number) => halfWidth(w) - 0.9;
 
+/**
+ * Доп. изгиб ПЕШЕЙ ТРОПЫ (лес/роща/озеро) поверх оси дороги — петляющая тропка,
+ * а не прямая трасса. Короче волны и круче, чем у дороги (шаг ~10–30 м). Одна и
+ * та же функция кормит и расстановку деревьев (world), и путь камеры/ходьбы
+ * (game) — поэтому тропа и просвет между деревьями совпадают.
+ */
+export const trailWeave = (d: number): number =>
+  5.5 * Math.sin(d / 17 + 0.7) + 2.8 * Math.sin(d / 6.7 + 2.1);
+/** Производная trailWeave — для направления взгляда вдоль тропы. */
+export const trailWeaveSlope = (d: number): number =>
+  (5.5 / 17) * Math.cos(d / 17 + 0.7) + (2.8 / 6.7) * Math.cos(d / 6.7 + 2.1);
+
+/**
+ * РЕЗКИЙ ПОВОРОТ-АВАРИЯ: на последних ~45 м перед `center` дорога круто уходит в
+ * сторону `side` (видно издали — «вписаться нельзя»). После апекса держим смещение
+ * (дорога ушла, а мы летим прямо). Одна и та же функция в world (рендер дороги) и
+ * game (путь машины) — поэтому машина реально едет в поворот, а потом срывается.
+ */
+export function crashBend(d: number, center: number, side: number): number {
+  const x = (d - (center - 45)) / 45; // 0 за 45 м до апекса → 1 в апексе
+  if (x <= 0) return 0;
+  const s = x < 1 ? x * x * (3 - 2 * x) : 1; // smoothstep, дальше держим
+  return side * 28 * s; // до ~28 м вбок — крутой вираж
+}
+
 export function makeRoad(seed: number): Road {
   const r = lcg(seed);
   const TAU = Math.PI * 2;

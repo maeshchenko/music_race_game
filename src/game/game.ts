@@ -13,11 +13,17 @@ import {
   type Difficulty, type BlockExtras, type BlockDef,
 } from './blocks';
 import { makeGate } from './gate';
-import { steerRange } from './road';
+import { steerRange, trailWeave, trailWeaveSlope, crashBend } from './road';
 import { Particles } from './particles';
 import { Traffic } from './traffic';
 import { Sfx } from './sfx';
 import { IntensityDirector } from './intensity';
+import { Story, type Phase, type StoryCam, WINTER, lerpTheme } from './story';
+import { Narrator } from './narrator';
+import { Runner } from './runner';
+import { NightAmbient } from './ambient';
+import { makeGlitchPass } from './glitchPass';
+import type { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import type { Level } from './level';
 import { EndlessChain } from './chain';
 import type { Conductor } from '../conductor';
@@ -122,6 +128,41 @@ export class Game {
   private bloomPass: UnrealBloomPass | null = null;
   // #A дирижёр интенсивности: серый ночной базис ↔ редкие пики (см. intensity.ts)
   private director = new IntensityDirector();
+  // сюжетный спуск (story.ts): живёт в бесконечном заезде, по дистанции уводит
+  // мир в сюр. null в обычном (не-endless) заезде. narrator — суб-полоса реплик.
+  private story: Story | null = null;
+  private narrator: Narrator | null = null;
+  private glitchPass: ShaderPass | null = null;
+  // пеший режим: машина прячется, бежит/идёт человечек (runner.ts)
+  private runner: Runner | null = null;
+  private onFoot = false;
+  private storyCam: StoryCam = 'chase'; // текущий режим камеры из Story
+  // роща/озеро — Firewatch-управление: ходьба клавишами + свободный mouse-look
+  private walkMode = false;      // дистанцию ведут шаги (W), не аудио
+  private walkDist = 0;          // накопленная пешая дистанция
+  private frozen = false;        // озеро: движение остановлено (сидишь)
+  private runnerLift = 0;        // подъём человечка на камень в конце тропы (плавный)
+  private playSec = 0;           // суммарное время игры (для титров «прошли за N минут»)
+  private creditsShown = false;  // финальные титры уже запущены
+  private lookYaw = 0;           // свободный осмотр: поворот (рад)
+  private lookPitch = 0;         // свободный осмотр: наклон (рад)
+  private keyFwd = false;
+  private keyLeft = false; private keyRight = false;
+  private crashUntil = -1;       // таймер краш-секвенса (машину переворачивает), сек
+  private crashSide = 1;         // в какую сторону уносит машину при крахе
+  private crashDist = 0;         // дистанция апекса поворота-аварии
+  private crashArmed = false;    // резкий поворот перед аварией уже включён (виден на подъезде)
+  private approachStarted = false; // подъезд к аварии: поле + зима наступают
+  private approachFromTheme: WorldTheme | null = null; // тема, ИЗ которой к зиме
+  private zonesSet = false;      // пешие зоны по дистанции включены (бесшовные переходы)
+  private wrecked = false;       // машина лежит перевёрнутым обломком (виден, можно обойти)
+  private readonly wreckPos = new THREE.Vector3(); // мировая позиция обломка
+  private readonly activePos = new THREE.Vector3(); // за кем следует мир (машина/игрок)
+  private wreckYaw = 0;          // рыскание обломка
+  private orbitR = 5.5;          // радиус орбитальной камеры (3-е лицо вокруг человечка)
+  private fpDebug = false;       // C: переключить вид на первое лицо (для теста)
+  private ambient: NightAmbient | null = null; // ночной амбиент (роща/озеро)
+  private sitTime = 0;           // секунды на берегу (freeze) — гонит реплики по времени
   private bpm: number;
   private bestScore: number; // глобальный рекорд — призрак-цель в HUD
   private recordBroken = false;
@@ -145,6 +186,8 @@ export class Game {
   private coastDist = 0;
   private finishNotified = false;
   onFinish?: () => void;
+  /** Финал: Y — сыграть ещё раз (с сюжетом), N — обычная безлимитная гонка. */
+  onReplay?: (withStory: boolean) => void;
   /** endless: вызывается на финише трека (для тикера/наград). */
   onSegment?: () => void;
   private lastSeamT = 0; // транспортное время последнего отпразднованного стыка
@@ -174,7 +217,7 @@ export class Game {
     extras: BlockExtras & {
       lucky?: boolean; best?: number; carColor?: number; theme?: WorldTheme;
     } = { gold: false, mystery: 0 },
-    endlessOpts?: { conductor: Conductor; nextSong: () => Promise<Song> },
+    endlessOpts?: { conductor: Conductor; nextSong: () => Promise<Song>; story?: boolean },
   ) {
     this.missLimit = diff === 'hard' ? 2 : 3;
     this.bpm = song.bpm;
@@ -210,6 +253,13 @@ export class Game {
       this.chain.pushFirst(song);
       this.level = this.chain; // дальше вся геометрия/тайминги — из цепочки
       this.world.rebuild(); // чанки были построены со заглушкой — пересобрать под цепочку
+      // сюжетный спуск активен только в бесконечном заезде И если не отключён
+      // (N в финале → обычная безлимитная гонка без аварии/сюжета)
+      if (endlessOpts.story !== false) {
+        this.story = new Story();
+        const jump = new URLSearchParams(location.search).get('story'); // dev: ?story=forest
+        if (jump) this.story.jumpTo(jump as Phase);
+      }
     } else {
       this.posSource = this.player!;
       this.blocks = new Blocks(song, this.level, diff, extras);
@@ -257,6 +307,9 @@ export class Game {
         new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.5, 0.82,
       );
       this.composer.addPass(this.bloomPass);
+      // глитч-слой «сходит с ума» — гонится insanity (story.ts), ноль на старте
+      this.glitchPass = makeGlitchPass();
+      this.composer.addPass(this.glitchPass);
       this.composer.addPass(new OutputPass());
       // bloom в half-res: визуально почти идентично (bloom — и так размытие),
       // но вчетверо меньше пикселей под тяжёлый пасс → запас GPU под звук.
@@ -270,6 +323,7 @@ export class Game {
     this.fx = document.createElement('div');
     this.fx.className = 'fx-layer';
     container.appendChild(this.fx);
+    this.narrator = new Narrator(container); // суб-полоса реплик спуска
     this.feverEdge = document.createElement('div');
     this.feverEdge.className = 'fever-edge';
     container.appendChild(this.feverEdge);
@@ -349,15 +403,43 @@ export class Game {
   }
 
   // турбо «закись азота» — HOLD: зажал → тратится и ускоряет, отпустил → стоп
-  private onMouseDown = (e: MouseEvent) => { if (e.button === 0) this.nosHeld = true; };
+  private onMouseDown = (e: MouseEvent) => { if (e.button === 0 && !this.walkMode) this.nosHeld = true; }; // пешком клик не даёт турбо
   private onMouseUp = () => { this.nosHeld = false; };
+  // ходьба: и латиница (e.code — физическая клавиша), и кириллица (e.key) — если
+  // игрок не переключил раскладку, WASD = ЦФЫВ на тех же клавишах
+  private static isFwd = (e: KeyboardEvent) => e.code === 'KeyW' || e.code === 'ArrowUp' || e.key === 'ц' || e.key === 'Ц';
+  private static isLeft = (e: KeyboardEvent) => e.code === 'KeyA' || e.code === 'ArrowLeft' || e.key === 'ф' || e.key === 'Ф';
+  private static isRight = (e: KeyboardEvent) => e.code === 'KeyD' || e.code === 'ArrowRight' || e.key === 'в' || e.key === 'В';
+
   private onKeyUp = (e: KeyboardEvent) => {
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE') this.nosHeld = false;
+    if (Game.isFwd(e)) this.keyFwd = false;
+    if (Game.isLeft(e)) this.keyLeft = false;
+    if (Game.isRight(e)) this.keyRight = false;
   };
 
   private onKey = (e: KeyboardEvent) => {
+    // ФИНАЛ (титры на берегу): Y — сыграть ещё раз (с сюжетом), N — обычная гонка
+    if (this.creditsShown && this.frozen) {
+      // Y/N — и латиница, и кириллица (Y=н, N=т на ЙЦУКЕН)
+      if (e.code === 'KeyY' || e.key === 'н' || e.key === 'Н') { this.onReplay?.(true); return; }
+      if (e.code === 'KeyN' || e.key === 'т' || e.key === 'Т') { this.onReplay?.(false); return; }
+    }
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE') this.nosHeld = true;
-    if (e.code === 'KeyC') this.firstPerson = !this.firstPerson; // физ. клавиша — любая раскладка
+    // WASD/стрелки (и кириллица ЦФЫВ) — ходьба в пешем режиме; в гонке не влияют
+    if (Game.isFwd(e)) this.keyFwd = true;
+    if (Game.isLeft(e)) this.keyLeft = true;
+    if (Game.isRight(e)) this.keyRight = true;
+    // C — переключить вид: в гонке салон/снаружи, пешком — 3-е лицо/1-е лицо (тест)
+    if (e.code === 'KeyC') {
+      if (this.walkMode) this.fpDebug = !this.fpDebug;
+      else this.firstPerson = !this.firstPerson;
+    }
+    // dev (Z): встать за ~10с до поворота-аварии — быстро тестить лес/краш
+    if (e.code === 'KeyZ' && this.story) {
+      this.story.approachForest(400);
+      this.pop('⏩ к повороту в лес', 'pop-theme');
+    }
     if (e.code === 'Digit0' || e.code === 'Numpad0') {
       // перебор тем оформления на лету — посмотреть снег/дождь/рассвет/закат
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
@@ -365,7 +447,99 @@ export class Game {
       this.world.applyTheme(th);
       this.pop(`🎨 ${th.name}`, 'pop-theme');
     }
+    // dev: Shift+1..4 — прыжок к фазе (1 гонка, 2 лес, 3 роща, 4 озеро)
+    if (e.shiftKey && this.story && e.code.startsWith('Digit')) {
+      const n = +e.code.slice(5);
+      if (n >= 1 && n <= 4) {
+        this.story.jumpTo(n);
+        this.narrator?.clear();
+        // прыжок меняет bias → пересинхронизируем границы зон в world (иначе пешие
+        // зоны/озеро уезжают). И подхватываем дистанцию под новую фазу.
+        if (this.zonesSet) {
+          const [zf, zg, zl] = this.story.zoneStarts();
+          this.world.setZones(zf, zg, zl);
+          const target = [undefined, undefined, zf, zg, zl][n]; // 2 лес,3 роща,4 озеро
+          if (target != null) this.walkDist = target + 5; // встать на старт фазы
+          this.frozen = false; this.sitTime = 0;
+        }
+      }
+    }
   };
+
+  /**
+   * Кинематографичная авария: на непроходимом повороте машину сносит ПРЯМО (в лес),
+   * пока дорога с кристаллами уходит в поворот, и переворачивает колёсами кверху.
+   * Ставит и машину (кувырок), и камеру 3-го лица (провожает кувырок). cx,y — точка съезда.
+   */
+  private updateCrash(t: number, cx: number, y: number, dt: number) {
+    const dur = 3.6;
+    const p = THREE.MathUtils.clamp(1 - (this.crashUntil - t) / dur, 0, 1); // 0..1
+    const ease = (x: number) => 1 - (1 - x) * (1 - x); // easeOutQuad
+    const launchX = cx + this.carX;
+    const fwd = ease(p) * 26;                        // едем ПРЯМО (дорога ушла в поворот — мы нет)
+    const sideX = -this.crashSide * ease(p) * 13;    // сносит НА ВНЕШНЮЮ сторону поворота, в деревья
+    const arc = Math.sin(p * Math.PI) * 2.6                       // подброс
+      + Math.max(0, Math.sin(p * 13)) * (1 - p) * 0.8;           // отскоки
+    this.car.visible = true;
+    this.car.position.set(launchX + sideX, y + arc, -this.crashDist - fwd);
+    // переворот: к концу — колёсами кверху (≈0.94π) с затухающим вихлянием
+    const rx = THREE.MathUtils.lerp(0, Math.PI * 0.94, ease(p)) + Math.sin(p * 20) * (1 - p) * 1.1;
+    const rz = this.crashSide * (Math.sin(p * 15) * (1 - p) * 1.4 + 0.16 * ease(p));
+    this.car.rotation.set(rx, this.car.rotation.y, rz);
+    // камера ПЛАВНО провожает машину (сзади-сверху, чуть сбоку), а не «прыгает» на
+    // фикс-точку — продолжение погони, без резкой смены кадра. Дрожь от удара.
+    const shake = (1 - p) * 0.5;
+    const target = this.camScratch.set(
+      this.car.position.x + this.crashSide * 2,
+      this.car.position.y + 4.2,
+      this.car.position.z + 10.5,
+    );
+    this.camera.position.lerp(target, 1 - Math.exp(-6 * dt));
+    this.camera.position.x += (Math.random() - 0.5) * shake;
+    this.camera.position.y += (Math.random() - 0.5) * shake;
+    this.camera.lookAt(this.car.position.x, this.car.position.y + 0.4, this.car.position.z);
+    this.camera.rotation.z += Math.sin(t * 26) * 0.1 * (1 - p);
+  }
+
+  /** Высота земли. В зоне ОЗЕРА выравниваем к плоской глади (как world.hAt) —
+   *  человечек/камера/вода на одном плоском уровне, озеро читается. */
+  private groundY(dist: number): number {
+    if (!this.zonesSet || !this.story) return this.level.heightAt(dist);
+    const ls = this.story.zoneStarts()[2];
+    if (dist < ls - 45) return this.level.heightAt(dist);
+    const k = THREE.MathUtils.clamp((dist - (ls - 45)) / 45, 0, 1);
+    let h = this.level.heightAt(dist) * (1 - k) + this.level.heightAt(ls) * k;
+    const lakeEnd = ls + 70; // конец тропы (story.freezeAfter) — дальше полотно под воду
+    if (dist > lakeEnd) h -= Math.min(1, (dist - lakeEnd) / 7) * 3.4;
+    return h;
+  }
+
+  /** Убрать весь гоночный HUD после аварии (пешая фаза = «другая игра»): очки/
+   *  скорость/цель, комбо-кольцо и шкала, овердрайв-ускорение, fever-края, турбо.
+   *  Нарратор и слой вспышек (this.fx) остаются. */
+  private hideRaceHud() {
+    for (const el of [
+      this.hud, this.feverEdge, this.comboBar, this.comboRingWrap,
+      this.odBar, this.odIcon, this.odPrompt, this.turboFx, this.goalEl,
+    ]) { if (el) el.style.display = 'none'; }
+  }
+
+  private walkHint: HTMLDivElement | null = null;
+  /** Аккуратная подсказка слева-сверху после аварии: чем двигаться. Сама гаснет. */
+  private showWalkHint() {
+    if (this.walkHint) return;
+    const el = document.createElement('div');
+    el.textContent = 'Движение — WASD или стрелки';
+    el.style.cssText = 'position:absolute;top:14px;left:16px;z-index:8;pointer-events:none;'
+      + 'padding:.45rem .7rem;border-radius:10px;background:rgba(12,16,22,.5);'
+      + 'color:#dfe6f2;font:600 14px/1 system-ui,sans-serif;text-shadow:0 1px 3px #000;'
+      + 'backdrop-filter:blur(4px);transition:opacity 1.2s;opacity:0';
+    this.fx.appendChild(el);
+    this.walkHint = el;
+    requestAnimationFrame(() => { if (this.walkHint) this.walkHint.style.opacity = '1'; });
+    // научили — через ~12 c мягко убираем, чтобы не мешать созерцанию
+    setTimeout(() => { if (this.walkHint) this.walkHint.style.opacity = '0'; }, 12000);
+  }
 
   /** #14 тактильная отдача (мобайл/поддерживающие устройства) — no-op иначе. */
   private haptic(ms: number | number[]) {
@@ -712,12 +886,57 @@ export class Game {
     this.sfx.jackpot();
   }
 
-  /**
-   * Финиш трека в бесконечном сете: салют у машины, ярлык, камео-флориш камеры
-   * (отъезд назад-вверх и возврат) + начисление награды. Машина НЕ тормозит —
-   * следующий трек уже подхватывает, это дофаминовый пик без разрыва потока.
-   */
+  // финал-стык: 'soft' (по умолчанию — аккуратный фейерверк + надпись, без отрыва
+  // камеры/вспышек/слоумо, не выбивает из потока) или 'strong' (старый климакс,
+  // оставлен в «библиотеке»). Переключатель — `setFinaleMode`.
+  private finaleMode: 'soft' | 'strong' = 'soft';
+  /** Сменить стиль стыка треков ('soft' дефолт / 'strong' — старый климакс). */
+  setFinaleMode(m: 'soft' | 'strong') { this.finaleMode = m; }
+
+  /** Диспетчер стыка трека: мягкий (дефолт) или сильный (старый). */
   private finale(t: number) {
+    if (this.finaleMode === 'strong') this.finaleStrong(t);
+    else this.finaleSoft(t);
+  }
+
+  /**
+   * МЯГКИЙ стык трека (дефолт): аккуратный фейерверк в небе + ненавязчивая надпись
+   * (тот же текст: уровень пройден + следующий трек), БЕЗ отрыва камеры, БЕЗ
+   * сильных вспышек/слоумо/тряски — поток не рвётся. Машина едет дальше.
+   */
+  private finaleSoft(t: number) {
+    const t0 = performance.now(); // PERF-МЕТРИКА — НЕ УДАЛЯТЬ
+    this.sfx.jackpot(); // лёгкий праздничный аккорд (без саб-бума)
+    const genre = this.chain?.genreAt(t) ?? '';
+    const title = this.chain?.titleAt(t) ?? '';
+    // аккуратная надпись сверху — НЕ загораживает экран (без вуали/вспышки)
+    const cap = document.createElement('div');
+    cap.className = 'finale-soft';
+    cap.innerHTML = '<div class="t">УРОВЕНЬ ПРОЙДЕН</div>'
+      + `<div class="s">ДАЛЬШЕ${genre ? ': ' + genre.toUpperCase() : ''}${title ? ': «' + title + '»' : ''}</div>`;
+    this.fx.appendChild(cap);
+    setTimeout(() => cap.remove(), 2900);
+    // фейерверк: несколько мягких залпов в небо за машиной (без тряски экрана)
+    const { x, y, z } = this.car.position;
+    for (let k = 0; k < 6; k++) {
+      setTimeout(() => {
+        if (this.disposed || this.paused) return;
+        this.particles.burst(
+          x + (Math.random() - 0.5) * 12, y + 2.5 + Math.random() * 4.5, z - 4 - Math.random() * 9,
+          k % 2 ? C_GOLD : C_GOLD_SPARK, 34, 2,
+        );
+      }, k * 200);
+    }
+    this.onSegment?.(); // тикер + ноты/XP за пройденный трек
+    console.warn(`[finale-soft] total ${(performance.now() - t0).toFixed(1)}ms @t=${t.toFixed(1)}`);
+  }
+
+  /**
+   * СИЛЬНЫЙ финиш (старый, «библиотека» — по умолчанию НЕ используется): салют,
+   * камео-флориш камеры (отъезд назад-вверх), полноэкранная вспышка/вуаль, слоумо.
+   * Включается `setFinaleMode('strong')`.
+   */
+  private finaleStrong(t: number) {
     const t0 = performance.now(); // PERF-МЕТРИКА — НЕ УДАЛЯТЬ
     // #45 КЛИМАКС: ощутимый слоумо-фриз «прожить пик» + залпы салюта в небо
     // волнами 1.8с + золотая вспышка краёв всего экрана + всплеск блума.
@@ -767,6 +986,19 @@ export class Game {
   }
 
   private onMouse = (e: MouseEvent) => {
+    if (this.walkMode) {
+      // пеший режим: мышь ВРАЩАЕТ камеру вокруг человечка (орбита), не руль.
+      // Под pointer-lock — по дельте; без него — по позиции курсора.
+      if (this.pointerLocked) {
+        this.lookYaw -= e.movementX / 320;
+        this.lookPitch += e.movementY / 320;
+      } else {
+        this.lookYaw = -((e.clientX / innerWidth) * 2 - 1) * Math.PI;
+        this.lookPitch = ((e.clientY / innerHeight) * 2 - 1) * 0.8;
+      }
+      this.lookPitch = THREE.MathUtils.clamp(this.lookPitch, -1.2, 1.2);
+      return;
+    }
     if (this.pointerLocked) {
       // относительное движение, края «прилипают» — курсор не улетает
       this.mouseX = THREE.MathUtils.clamp(this.mouseX + e.movementX / 380, -1, 1);
@@ -844,6 +1076,7 @@ export class Game {
     // мастер-часы — позиция музыки, но сглаженная: positionSec() дрожит
     // (outputLatency в Chrome плавает кадр к кадру), напрямую машина дёргается.
     // Ведём свои часы по dt и мягко подтягиваем к аудио.
+    if (!this.paused) this.playSec += dt; // счётчик игрового времени (для титров)
     if (!this.paused) {
       // positionSec возвращает 0, пока аудио-контекст реально не играет —
       // ГАРАНТИЯ: машина не трогается без слышимого звука
@@ -878,10 +1111,10 @@ export class Game {
     const t = Math.max(0, this.tEst + this.audioOffset);
     // турбо «закись азота»: держишь кнопку → тратится бак и врубается визуал
     // скорости. Мобайл — авто при полном баке (нет второй руки на удержание).
-    if (IS_MOBILE && this.energy >= 1) this.nosHeld = true;
+    if (IS_MOBILE && this.energy >= 1 && !this.walkMode) this.nosHeld = true;
     // запускать можно ТОЛЬКО с полного бака; запущенный выпускается ДО ПОСЛЕДНЕГО
-    // (отпускание кнопки не останавливает разряд)
-    if (this.nosHeld && this.energy >= 1 && !this.nosActive && !this.paused) {
+    // (отпускание кнопки не останавливает разряд). После аварии (пешком) — НЕТ турбо.
+    if (this.nosHeld && this.energy >= 1 && !this.nosActive && !this.paused && !this.walkMode) {
       this.nosActive = true;
       this.conductor?.setRate(1.18, 0.3); // РЕАЛЬНЫЙ разгон ×1.18, быстрый поджиг
       this.pop('⚡ ТУРБО!', 'pop-combo pop-mega');
@@ -905,7 +1138,8 @@ export class Game {
     // #18 золотые волны: внезапно ряд блоков «золотой» на ~3с — variable-ratio
     // сюрприз (×2.5 очки + золотые искры). Старт по случайному таймеру.
     if (this.nextGolden < 0) this.nextGolden = t + 18 + Math.random() * 22;
-    if (!this.paused && t >= this.nextGolden && t >= this.goldenUntil) {
+    // после аварии (пешая «другая игра») гоночных ивентов нет — золотую волну глушим
+    if (!this.paused && !this.walkMode && t >= this.nextGolden && t >= this.goldenUntil) {
       this.goldenUntil = t + 3.2;
       this.nextGolden = t + 22 + Math.random() * 30;
       this.pop('🌟 ЗОЛОТАЯ ВОЛНА! ×2.5', 'pop-combo pop-mega');
@@ -918,7 +1152,9 @@ export class Game {
     // аварии = слишком легко) — новизну подаём раньше + золотая волна как вызов.
     if (this.nextNovelty < 0) this.nextNovelty = t + 35 + Math.random() * 20;
     const comfortable = this.combo > 30 && (t - this.lastCrashT) > 22;
-    if (!this.paused && (t >= this.nextNovelty || (comfortable && t >= this.nextNovelty - 15))) {
+    // под сюжетным спуском (фаза ≠ race) и на подъезде к аварии (зима) новизну глушим
+    if (!this.story?.active && !this.approachStarted && !this.paused
+        && (t >= this.nextNovelty || (comfortable && t >= this.nextNovelty - 15))) {
       this.nextNovelty = t + 35 + Math.random() * 20;
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
       const th = THEMES[this.themeIndex];
@@ -986,14 +1222,130 @@ export class Game {
       }
     } else if (this.finished) {
       dist = this.level.totalDist + this.coastDist;
+    } else if (this.crashUntil > 0 && t < this.crashUntil) {
+      dist = this.crashDist; // во время аварии мир застыл на точке съезда
+    } else if (this.walkMode) {
+      // пешком (лес/роща/озеро): дистанцию ведёт W, не аудио. На озере (frozen)
+      // движение остановлено — сидишь и смотришь.
+      if (!this.paused && !this.frozen && this.keyFwd) {
+        this.walkDist += 5.0 * dt; // только ВПЕРЁД (W); назад нельзя — A/D дают стрейф
+      }
+      dist = this.walkDist;
     } else {
       dist = this.level.distAt(t);
+    }
+
+    // ПОДЪЕЗД К АВАРИИ. За ~450 м до леса: зона становится ПОЛЕМ и наступает
+    // холодная туманная снежная зима; за ~50 м — резкий поворот в дороге (видно
+    // издали, едем прямо и не вписываемся).
+    if (this.story && !this.walkMode) {
+      const m = this.story.metersToForest(dist);
+      if (!this.approachStarted && m > 0 && m < 450) {
+        this.approachStarted = true;
+        this.crashArmed = true;
+        this.crashSide = Math.random() < 0.5 ? -1 : 1;
+        this.crashDist = dist + m;
+        this.approachFromTheme = THEMES[this.themeIndex];
+        this.world.setApproachField(this.crashDist, 450); // район = поле, дорога 2 полосы
+        this.world.setCrashBend(this.crashDist, this.crashSide);
+        this.world.applyThemeColors(WINTER); // precip → снег
+        this.world.refreshPrecip();
+      }
+      // плавно нагоняем зиму к моменту аварии
+      if (this.approachStarted && this.approachFromTheme) {
+        const k = THREE.MathUtils.clamp(1 - m / 450, 0, 1);
+        this.world.applyThemeColors(lerpTheme(this.approachFromTheme, WINTER, k));
+      }
+    }
+
+    // #ST сюжетный спуск: по дистанции уводим мир в сюр (тема/туман/insanity/
+    // темп/нарратор). До леса Story молчит (active=false) — мир штатный.
+    if (this.story && !this.paused) {
+      // на берегу (frozen) мир стоит, но реплики должны идти по ВРЕМЕНИ: кормим
+      // Story виртуальной дистанцией (walkDist + время сидения), не двигая мир.
+      if (this.frozen) this.sitTime += dt;
+      // ФИНАЛЬНЫЕ ТИТРЫ: через ~15 с после того, как встал на камень — над водой
+      // всплывают титры (благодарность + время прохождения).
+      if (this.frozen && !this.creditsShown && this.sitTime >= 5) {
+        this.creditsShown = true;
+        const m = Math.max(1, Math.round(this.playSec / 60));
+        const mod10 = m % 10, mod100 = m % 100;
+        const word = (mod10 === 1 && mod100 !== 11) ? 'минуту'
+          : (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) ? 'минуты' : 'минут';
+        this.world.showCredits([
+          'Спасибо за игру!',
+          `вы прошли её за ${m} ${word}`,
+          'Сделано с любовью.',
+          'Мижган.',
+        ]);
+        // закреплённая подсказка управления (не гаснет) — выбор финала
+        this.narrator?.pin('Нажми Y — сыграть ещё раз · N — обычная гонка');
+      }
+      const storyDist = this.frozen ? this.walkDist + this.sitTime * 2.5 : dist;
+      const st = this.story.tick(storyDist, THEMES[this.themeIndex]);
+      this.storyCam = st.camera;
+      this.frozen = st.freeze;
+      // БЕСШОВНОСТЬ: пропы зон выбираются ПО ДИСТАНЦИИ (world.setZones), цвета/туман
+      // лерпятся (applyThemeColors), небо переключаем явно — без мгновенной подмены.
+      if ((st.enteredPhase === 'forest' || st.enteredPhase === 'grove' || st.enteredPhase === 'lake')
+          && !this.zonesSet) {
+        const [zf, zg, zl] = this.story.zoneStarts();
+        this.world.setZones(zf, zg, zl);
+        this.zonesSet = true;
+      }
+      if (st.propSetChanged) this.world.updateSky(st.propSet); // сияние/луна/звёзды/вода под фазу
+      if (st.colors) {
+        this.world.applyThemeColors(st.colors); // плавный кросс-фейд тумана/пола/воды
+        if (st.rebuildPrecip) this.world.refreshPrecip();
+      }
+      // ВХОД В ЛЕС = АВАРИЯ и переход в «другую игру»: непроходимый поворот, машину
+      // сносит и переворачивает (кинематографично, ~3.6с). Дальше — пешком: 3-е лицо,
+      // орбита мыши вокруг человечка, WASD-ходьба по петляющей тропе. Без спешки.
+      if (st.enteredPhase === 'forest') {
+        // апекс/сторона уже заданы при армировании поворота; если прыгнули мимо
+        // (Shift-jump) — задаём здесь
+        if (!this.crashArmed) {
+          this.crashArmed = true;
+          this.crashDist = dist; this.crashSide = Math.random() < 0.5 ? -1 : 1;
+          this.world.setCrashBend(this.crashDist, this.crashSide);
+        }
+        this.crashUntil = t + 3.6;
+        this.flash('#ffffff');
+        this.shake = Math.min(1, this.shake + 1);
+        this.haptic([40, 80, 160]);
+        if (!this.runner) { this.runner = new Runner(); this.world.scene.add(this.runner.group); }
+        this.hideRaceHud();              // гоночный HUD (очки/скорость/комбо/ускорение) убрать — дальше другая игра
+        this.showWalkHint();             // аккуратно слева-сверху: чем двигаться (само гаснет)
+        this.walkMode = true;            // дистанцию дальше ведут шаги (после краша)
+        this.walkDist = this.crashDist;  // СТАРТ строго на входе в лес (не аудио-дист → нет перелёта в озеро)
+        this.lookYaw = 0; this.lookPitch = 0; // орбита по умолчанию — сзади, чуть сверху
+        if (!this.ambient) this.ambient = new NightAmbient();
+        this.ambient.fadeTo(0.85, 10);   // ночной амбиент проступает
+        this.conductor?.duckMusic(-22, 10);
+      }
+      // углубляемся: музыка тает дальше, на озере добавляем воду
+      if (st.enteredPhase === 'grove') this.conductor?.duckMusic(-34, 8);
+      if (st.enteredPhase === 'lake') { this.ambient?.setWater(0.9, 6); this.conductor?.duckMusic(-52, 10); }
+      // на колёсной фазе (race) — в машине; на пеших — пешком
+      this.onFoot = st.camera !== 'chase';
+      this.director.setInsanity(st.insanity);
+      if (st.rateChanged) this.conductor?.setRate(st.audioRate, 3); // плавное замедление
+      // реплики не сыплем во время самой аварии — только когда уже стоишь/идёшь
+      if (!(this.crashUntil > 0 && t < this.crashUntil)) {
+        const line = this.story.pendingNarration(storyDist);
+        if (line) this.narrator?.say(line);
+      }
     }
 
     // руление мышью с плавным догоном и креном
     // быстрый догон курсора (ритм-игра), вес — в крене и довороте носа
     // предел руля следует ширине дороги (2 полосы — уже, 3 — шире)
-    const target = THREE.MathUtils.clamp(this.mouseX, -1, 1) * steerRange(this.level.wideAt(dist));
+    // в гонке руль — мышь; в пешем Firewatch-режиме мышь занята осмотром, а A/D
+    // дают небольшой стрейф по тропе
+    const steerInput = this.walkMode
+      ? (this.frozen ? 0 : ((this.keyRight ? 1 : 0) - (this.keyLeft ? 1 : 0)) * 0.7) // на камне (freeze) стрейфа нет
+      : this.mouseX;
+    const target = THREE.MathUtils.clamp(steerInput, -1, 1) * steerRange(this.level.wideAt(dist));
     const prevX = this.carX;
     this.carX = THREE.MathUtils.damp(this.carX, target, 14, dt);
     // боковая скорость для крена/доворота — сглажена EMA: сырой Δ/dt шумит на
@@ -1002,11 +1354,14 @@ export class Game {
     this.vxSmooth += (vxRaw - this.vxSmooth) * Math.min(1, dt * 12);
     const vx = this.vxSmooth;
 
-    // позиция: ось дороги (повороты) + руление, рельеф + тангаж по уклону
+    // машина/камера идут по ЧИСТОЙ оси (БЕЗ изгиба-аварии): дорога сворачивает в
+    // резкий поворот, а мы едем прямо и НЕ вписываемся — видно, как трасса с
+    // кристаллами уходит вбок, а нас несёт прямо в лес. Изгиб остаётся в рендере
+    // дороги (world.cAt) и в кристаллах (blocks), но не в нашем пути.
     const cx = this.level.curveAt(dist);
     const roadDir = (this.level.curveAt(dist + 2) - this.level.curveAt(dist - 2)) / 4;
-    const y = this.level.heightAt(dist);
-    const yAhead = this.level.heightAt(dist + 2.4);
+    const y = this.groundY(dist);
+    const yAhead = this.groundY(dist + 2.4);
     this.car.position.set(cx + this.carX, y, -dist);
     // нос -z: вверх = отрицательный rx; демпфер сглаживает смену уклона
     this.car.rotation.x = THREE.MathUtils.damp(
@@ -1016,44 +1371,122 @@ export class Game {
     this.car.rotation.y = -Math.atan(roadDir) + THREE.MathUtils.clamp(-vx * 0.035, -0.4, 0.4);
     this.car.rotation.z = THREE.MathUtils.clamp(vx * 0.014, -0.14, 0.14);
 
-    // микро-тряска от сбора, быстро гаснет; сила/вкл — канал cameraShake дирижёра
+    const crashing = this.crashUntil > 0 && t < this.crashUntil;
+    // авария только что кончилась → машина застывает обломком, выдаём инструкцию
+    if (this.crashUntil > 0 && !crashing && !this.wrecked) {
+      this.wrecked = true;
+      this.crashUntil = -1;
+      this.wreckPos.copy(this.car.position);
+      // перевёрнутая машина «крышей» уходит на ~1.4 м вниз (кузов высотой ~1.42,
+      // ориджин у колёс) → поднимаем обломок, чтобы он лежал НА земле, не тонул
+      this.wreckPos.y += 1.4;
+      this.wreckYaw = this.car.rotation.y;
+      this.world.clearCrashBend(); // дальше пешая тропа без виража-аварии
+      this.pop('⌨ WASD — ИДТИ · МЫШЬ — КАМЕРА · C — ВИД', 'pop-theme pop-mega');
+    }
+
+    // мировая позиция человечка на ПЕТЛЯЮЩЕЙ тропе. Тропа (world.cAt) вьётся во ВСЕХ
+    // пеших фазах (включая озеро) — человечек ДОЛЖЕН идти по той же кривой, иначе
+    // расходится с полотном и уходит в воду. Поэтому weave при любом пешем виде
+    // (foot/lakesit), а не только 'foot'.
+    const onPath = this.storyCam !== 'chase';
+    const weave = onPath ? trailWeave(dist) : 0;
+    const slope = onPath ? trailWeaveSlope(dist) : 0;
+    const charX = cx + this.carX + weave;
+    const heading = -Math.atan(roadDir + slope); // лицом вдоль тропы
+
     this.shake *= Math.exp(-7 * dt);
     const shG = this.director.shakeGain();
     const shX = (Math.random() - 0.5) * this.shake * 0.3 * shG;
     const shY = (Math.random() - 0.5) * this.shake * 0.22 * shG;
 
-    if (this.finished) {
-      // камера остаётся у финишных ворот и провожает машину взглядом
-      const fd = this.level.totalDist;
-      const camPos = this.camScratch.set(
-        this.level.curveAt(fd - 8) * 0.7 + this.level.curveAt(fd) * 0.3,
-        this.level.heightAt(fd - 8) + 4.0,
-        -(fd - 8.5),
-      );
-      this.camera.position.lerp(camPos, 1 - Math.exp(-3 * dt));
-      this.camera.lookAt(cx + this.carX, y + 0.8, -dist);
-    } else if (this.firstPerson) {
-      // вид водителя: камера у лобового, чуть перед стеклом (стекло непрозрачное)
-      this.camera.position.set(cx + this.carX + shX * 0.5, y + 1.4 + shY * 0.5, -dist - 0.95);
-      const look = 22;
-      this.camera.lookAt(
-        this.level.curveAt(dist + look) + this.carX,
-        this.level.heightAt(dist + look) + 1.25,
-        -dist - look,
-      );
+    if (crashing) {
+      // === КИНЕМАТОГРАФИЧНАЯ АВАРИЯ === машину сносит прямо с поворота в лес и
+      // переворачивает; камера 3-го лица провожает кувырок. Сам ставит car+camera.
+      this.updateCrash(t, cx, y, dt);
+      if (this.runner) this.runner.group.visible = false;
     } else {
-      // сзади-сверху, камера держится оси дороги
-      const camY = this.level.heightAt(Math.max(0, dist - 7.5)) + 4.2;
-      const camTarget = this.camScratch.set(
-        this.level.curveAt(Math.max(0, dist - 7.5)) + this.carX * 0.6, camY, -dist + 7.5,
-      );
-      this.camera.position.lerp(camTarget, 1 - Math.exp(-8 * dt));
-      this.camera.position.x += shX;
-      this.camera.position.y += shY;
-      this.camera.lookAt(
-        this.level.curveAt(dist + 8) + this.carX * 0.8, y + 1.0, -dist - 8,
-      );
+      // машина: ОБЛОМОК (перевёрнута на месте аварии, видна, можно обойти) либо
+      // (гонка) — это ты
+      if (this.wrecked) {
+        // обломок виден только в ЛЕСУ (на месте аварии, можно обойти/оглянуться).
+        // Дальше — роща/озеро — машины быть НЕ должно (иначе всплывает у воды,
+        // особенно после dev-прыжка, где дистанции пере-смещены).
+        const groveStart = this.story ? this.story.zoneStarts()[1] : Infinity;
+        const showWreck = dist < groveStart;
+        this.car.visible = showWreck;
+        if (showWreck) {
+          this.car.position.copy(this.wreckPos);
+          // лежит на крыше, завалившись набок — колёса видны кверху
+          this.car.rotation.set(Math.PI * 0.97, this.wreckYaw, this.crashSide * 0.42);
+        }
+      } else {
+        this.car.visible = !this.onFoot;
+        this.car.position.set(charX, y, -dist);
+      }
+      // человечек (ты) — 3-е лицо на тропе; в дебаг-1-м-лице (C) прячем тело.
+      // В конце тропы (frozen) ПЛАВНО ЗАБИРАЕТСЯ на камень (runnerLift) — стоит на нём
+      // над водой, а не утыкается в валун.
+      const ROCK_LIFT = 1.35; // высота верха камня над берегом
+      this.runnerLift = THREE.MathUtils.damp(this.runnerLift, this.frozen ? ROCK_LIFT : 0, 4, dt);
+      if (this.onFoot && this.runner) {
+        this.runner.group.visible = !this.fpDebug;
+        this.runner.group.position.set(charX, y + this.runnerLift, -dist);
+        this.runner.group.rotation.set(0, heading, 0);
+        this.runner.update(dist, this.keyFwd && !this.frozen ? 5.0 : 0);
+      } else if (this.runner) this.runner.group.visible = false;
+
+      // --- камера (вне аварии) ---
+      if (this.finished) {
+        const fd = this.level.totalDist;
+        const camPos = this.camScratch.set(
+          this.level.curveAt(fd - 8) * 0.7 + this.level.curveAt(fd) * 0.3,
+          this.level.heightAt(fd - 8) + 4.0, -(fd - 8.5),
+        );
+        this.camera.position.lerp(camPos, 1 - Math.exp(-3 * dt));
+        this.camera.lookAt(cx + this.carX, y + 0.8, -dist);
+      } else if (this.onFoot) {
+        // ПЕШИЙ режим: 3-е лицо, ОРБИТА мыши вокруг человечка (C → дебаг 1-е лицо)
+        const tx = charX, ty = y + this.runnerLift + (this.storyCam === 'lakesit' ? 0.9 : 1.2), tz = -dist;
+        if (this.fpDebug) {
+          const headH = this.storyCam === 'lakesit' ? 1.15 : 1.65;
+          // pitch инвертируем: мышь вверх → смотрим вверх (было наоборот)
+          const pitch = THREE.MathUtils.clamp(-this.lookPitch, -1.1, 0.95);
+          this.camera.position.set(charX + shX * 0.3, y + headH + shY * 0.2, -dist);
+          this.camera.rotation.set(pitch, heading + this.lookYaw, 0, 'YXZ');
+        } else {
+          const R = this.orbitR;
+          const pitch = THREE.MathUtils.clamp(this.lookPitch + 0.3, 0.05, 1.25); // над горизонтом
+          this.camera.position.set(
+            tx + R * Math.cos(pitch) * Math.sin(this.lookYaw) + shX,
+            ty + R * Math.sin(pitch) + shY,
+            tz + R * Math.cos(pitch) * Math.cos(this.lookYaw),
+          );
+          // мышь вверх (lookPitch < 0) → поднимаем цель взгляда В НЕБО (звёзды/сияние)
+          const up = Math.max(0, -this.lookPitch) * 14;
+          this.camera.lookAt(tx, ty + up, tz);
+        }
+      } else if (this.firstPerson) {
+        this.camera.position.set(cx + this.carX + shX * 0.5, y + 1.4 + shY * 0.5, -dist - 0.95);
+        const look = 22;
+        this.camera.lookAt(
+          this.level.curveAt(dist + look) + this.carX,
+          this.level.heightAt(dist + look) + 1.25, -dist - look,
+        );
+      } else {
+        const camY = this.level.heightAt(Math.max(0, dist - 7.5)) + 4.2;
+        const camTarget = this.camScratch.set(
+          this.level.curveAt(Math.max(0, dist - 7.5)) + this.carX * 0.6, camY, -dist + 7.5,
+        );
+        this.camera.position.lerp(camTarget, 1 - Math.exp(-8 * dt));
+        this.camera.position.x += shX;
+        this.camera.position.y += shY;
+        this.camera.lookAt(this.level.curveAt(dist + 8) + this.carX * 0.8, y + 1.0, -dist - 8);
+      }
     }
+    // за кем следует мир: пешком — за игроком (charX,-dist), иначе — за машиной
+    if (this.onFoot && !crashing) this.activePos.set(charX, y, -dist);
+    else this.activePos.copy(this.car.position);
     // камео-флориш финиша: камера отъезжает назад-вверх и плавно возвращается
     if (this.finaleCamT >= 0) {
       const ft = t - this.finaleCamT;
@@ -1078,6 +1511,13 @@ export class Game {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
+    // #ST крен/тилт камеры от «безумия» — мир кренится по мере спуска
+    const ins = this.director.insanity;
+    if (ins > 0.001) {
+      this.camera.rotation.z += Math.sin(t * 0.7) * ins * 0.07 + Math.sin(t * 2.7) * ins * 0.025;
+    }
+    this.narrator?.update(dt);
+    if (!this.paused) this.ambient?.update(dt); // редкие птицы по таймеру
     this.particles.update(dt);
 
     // блоки: сбор по позиции машины (+притяжение при магните или турбо)
@@ -1106,16 +1546,35 @@ export class Game {
         this.sfx.riser(false);
       }
       this.lastComboTier = comboTier;
-      // церемония финиша трека: салют + камео, разово на стыке (поток не рвём)
+      // церемония финиша трека: салют + камео (НЕ в пешем созерцании — сломало бы тишину)
       const seam = this.chain.lastSeamBefore(t);
-      if (seam > this.lastSeamT) { this.lastSeamT = seam; this.finale(t); }
+      if (seam > this.lastSeamT) { this.lastSeamT = seam; if (!this.walkMode) this.finale(t); }
+      const crashing = this.crashUntil > 0 && t < this.crashUntil;
       for (const seg of this.chain.active()) {
+        if (this.walkMode) {
+          // машины-трафик прячем ВСЕГДА (пешком/в аварии) — иначе они «летят по
+          // воздуху», когда нас кувыркает. Кристаллы видны ТОЛЬКО во время аварии
+          // (видно, как трасса с ними уходит в поворот), но без сбора/коллизий.
+          seg.traffic.root.visible = false;
+          seg.blocks.mesh.visible = crashing;
+          seg.blocks.gates.visible = crashing;
+          if (crashing) {
+            seg.blocks.update(
+              dist - seg.distOffset, carWorldX, t - seg.tOffset, dt, false, false,
+              this.director.blockThrob(), () => {}, () => {},
+              this.crashArmed ? (lld) => crashBend(lld + seg.distOffset, this.crashDist, this.crashSide) : undefined,
+            );
+          }
+          continue;
+        }
         const ld = dist - seg.distOffset;
         const lt = t - seg.tOffset;
         seg.blocks.update(
           ld, carWorldX, lt, dt, this.fever, magnetActive, this.director.blockThrob(),
           (b, perfect) => this.onCollect(b, perfect, t, seg.distOffset),
           () => this.onMiss(),
+          // кристаллы гнутся с дорогой на повороте-аварии (локальная дист → глобальная)
+          this.crashArmed ? (lld) => crashBend(lld + seg.distOffset, this.crashDist, this.crashSide) : undefined,
         );
         const r = seg.traffic.update(lt, seg.geoLevel, ld, carWorldX, this.nosActive || t < this.ramUntil);
         if (r.collided) hitObs = r.collided;
@@ -1127,6 +1586,7 @@ export class Game {
         dist, carWorldX, t, dt, this.fever, magnetActive, this.director.blockThrob(),
         (b, perfect) => this.onCollect(b, perfect, t, 0),
         () => this.onMiss(),
+        this.crashArmed ? (d) => crashBend(d, this.crashDist, this.crashSide) : undefined,
       );
       const r = this.traffic.update(t, this.level, dist, carWorldX, this.nosActive || t < this.ramUntil);
       hitObs = r.collided;
@@ -1303,7 +1763,20 @@ export class Game {
 
     // #44 палитра «разогревается» на пиках arousal, остывает в затишье
     if (!this.paused) this.renderer.toneMappingExposure = this.director.exposure();
-    this.world.update(dt, this.car.position, this.director.worldPulse(beatEnv)); // #16/#A пульс мира — канал worldPulse дирижёра
+    // ВАЖНО: пешком мир (чанки/светлячки/звёзды/небо/вода) следует за ИГРОКОМ, а
+    // не за машиной — иначе после аварии всё центрируется у неподвижного обломка.
+    this.world.update(dt, this.activePos, this.director.worldPulse(beatEnv)); // #16/#A пульс мира — канал worldPulse дирижёра
+    // #ST глитч-слой: один шейдер гонится insanity. На мобайле composer'а нет →
+    // дешёвый CSS-фильтр на канвасе как запасной «слом картинки».
+    if (this.glitchPass) {
+      this.glitchPass.uniforms.uInsanity.value = ins;
+      this.glitchPass.uniforms.uTime.value = t;
+      this.glitchPass.uniforms.uAspect.value = this.camera.aspect;
+    } else if (this.story) {
+      this.renderer.domElement.style.filter = ins > 0.001
+        ? `hue-rotate(${ins * 40}deg) saturate(${1 + ins * 0.8}) contrast(${1 + ins * 0.25})`
+        : '';
+    }
     if (this.composer) this.composer.render();
     else this.renderer.render(this.world.scene, this.camera);
 
@@ -1362,5 +1835,9 @@ export class Game {
     this.odPrompt.remove();
     this.turboFx.remove();
     this.goalEl.remove();
+    this.narrator?.dispose();
+    this.runner?.dispose();
+    this.ambient?.dispose();
+    this.renderer.domElement.style.filter = '';
   }
 }

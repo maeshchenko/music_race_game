@@ -282,6 +282,8 @@ export class Blocks {
     type PatName = 'sweep' | 'wall' | 'zigzag' | 'stairs' | 'pendulum' | 'double';
     const pickFrom = (a: PatName[]): PatName => a[Math.floor(Math.random() * a.length)];
     let lane = 0;
+    let lane2 = 0;   // последняя полоса в 2-полосной зоне (для чередования)
+    let same2 = 0;   // сколько блоков подряд в одной полосе (2-полосная зона)
     let lastShiftT = -10;
     let lastFarT = -100;
     let prevPitch: number | null = null;
@@ -385,7 +387,16 @@ export class Blocks {
       // уводим блок в ближнюю внешнюю полосу (1 шаг ±1, достижимо). Профиль ширины
       // рампится ~60м → перестроение растянуто на несколько блоков, не телепорт.
       const w = level.wideAt(dist);
-      if (w < 0.5 && lane === 0) { lane = patDir >= 0 ? 1 : -1; lastShiftT = c.t; }
+      // 2-полосная зона: центра нет. Раньше центр всегда уводили в `patDir` —
+      // паттерны, отдыхающие в центре (zigzag/sweep), залипали в ОДНОЙ полосе на
+      // всю трассу. Теперь чередуем края и не держим одну полосу дольше 3 блоков.
+      if (w < 0.5) {
+        if (lane === 0) { lane = lane2 !== 0 ? -lane2 : (patDir >= 0 ? 1 : -1); lastShiftT = c.t; }
+        if (lane === lane2) {
+          if (++same2 >= 3 && canShift) { lane = -lane; same2 = 0; lastShiftT = c.t; }
+        } else same2 = 0;
+        lane2 = lane;
+      }
       this.defs.push({
         dist,
         lane,
@@ -621,6 +632,7 @@ export class Blocks {
     carDist: number, carWorldX: number, time: number, dt: number, fever: boolean,
     magnet: boolean, throb: number,
     onCollect: (b: BlockDef, perfect: boolean) => void, onMiss: () => void,
+    bendAt: (localDist: number) => number = () => 0, // изгиб дороги (авария) — кристаллы гнутся с трассой
   ) {
     // DDA-прорежение: при входе нот-блока в ближнюю зону (~50 м) решаем
     // оставить или убрать — детерминированно по индексу, чтобы не дёргалось.
@@ -659,8 +671,8 @@ export class Blocks {
         const b = this.defs[i];
         if (b.dist > carDist + 9) break;
         if (b.collected || b.missed) continue;
-        if (b.dist > carDist - 1 && Math.abs(b.x - carWorldX) < 4.5)
-          b.x += (carWorldX - b.x) * Math.min(1, dt * 10);
+        if (b.dist > carDist - 1 && Math.abs(b.x + bendAt(b.dist) - carWorldX) < 4.5)
+          b.x += (carWorldX - bendAt(b.dist) - b.x) * Math.min(1, dt * 10);
       }
     }
 
@@ -670,11 +682,11 @@ export class Blocks {
       if (b.dist > carDist + 2.0) break;
       const lat = b.wide ? COLLECT_LATERAL * 1.7 : COLLECT_LATERAL; // МЕГА — шире зона
       if (!b.collected && !b.missed && !b.dropped &&
-          b.dist <= carDist + 1.2 && Math.abs(b.x - carWorldX) < lat) {
+          b.dist <= carDist + 1.2 && Math.abs(b.x + bendAt(b.dist) - carWorldX) < lat) {
         b.collected = true;
         // grading: попадание в центр полосы блока = PERFECT (непрерывная
         // ось мастерства — всегда видно, что оптимизировать)
-        const perfect = Math.abs(b.x - carWorldX) < lat * 0.42;
+        const perfect = Math.abs(b.x + bendAt(b.dist) - carWorldX) < lat * 0.42;
         onCollect(b, perfect);
         if (LEGACY) {
           // исходное поведение: мгновенно спрятать (уходит под землю)
@@ -707,7 +719,7 @@ export class Blocks {
       // вращение на глаз неотличимо, а матричной работы вдвое меньше. Чётность
       // по индексу — половина дальних обновляется каждый кадр, без мерцания
       if (b.dist > carDist + 70 && ((i ^ odd) & 1)) continue;
-      this.dummy.position.set(b.x, b.y, -b.dist);
+      this.dummy.position.set(b.x + bendAt(b.dist), b.y, -b.dist); // изгиб дороги (авария)
       if (b.kind === 'magnet') {
         // бонус крутится заметно быстрее
         this.dummy.rotation.set(time * 2.2, time * 3.1, 0);

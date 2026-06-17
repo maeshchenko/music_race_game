@@ -1,6 +1,7 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { buildCar } from './car';
-import { halfWidth, HALF_WIDE, LANE_DIVIDER } from './road';
+import { halfWidth, HALF_WIDE, LANE_DIVIDER, trailWeave, crashBend } from './road';
 import { IS_MOBILE } from '../platform';
 
 /**
@@ -40,8 +41,15 @@ export interface WorldTheme {
   hemiGround: number;
   hemiIntensity?: number; // яркость неба: ночь ~1.0, рассвет/закат выше
   lamp: number; // фонари: головка, конус, пятно, прожектор
-  precip: 'snow' | 'rain' | 'clear';
+  precip: 'snow' | 'rain' | 'clear' | 'stars' | 'fireflies';
   precipColor: number;
+  // цвета полотна/пола — для ПЛАВНОГО кросс-фейда пеших зон (лес/роща/озеро).
+  // Если заданы, applyThemeColors лерпит их на дорогу/землю/воду (иначе их ставит
+  // setPropSet мгновенно — для гонки/старых пропсетов).
+  floor?: number; // земля/пол
+  path?: number;  // полотно-тропа
+  water?: number; // гладь озера
+  pathGlow?: number; // слабый эмиссив полотна (лес/роща): тропа светится лунным — видно, куда идти
 }
 
 export const THEMES: WorldTheme[] = [
@@ -69,6 +77,14 @@ export const THEMES: WorldTheme[] = [
 ];
 
 export const pickTheme = (): WorldTheme => THEMES[Math.floor(Math.random() * THEMES.length)];
+
+/**
+ * Набор пропов (сюжетный спуск, story.ts): меняет СЛОВАРЬ декора чанка, не
+ * палитру. 'province' — штатный город/деревья. 'forest' — непролазная чаща:
+ * дома/гаражи/киоски прочь, плотная стена высоких деревьев вплотную к дороге,
+ * асфальт → земля (без разметки). Бэкрумсы/луна/поле — позже.
+ */
+export type PropSetId = 'province' | 'forest' | 'backrooms' | 'moon' | 'field' | 'grove' | 'lake';
 
 /**
  * Биом-сет: какие здания и как часто какой декор. Ротация биомов (через новизну
@@ -193,6 +209,24 @@ function makeGlowTexture(): THREE.CanvasTexture {
   grad.addColorStop(0.35, 'rgba(255, 165, 77, 0.28)');
   grad.addColorStop(0.7, 'rgba(255, 150, 60, 0.10)');
   grad.addColorStop(1, 'rgba(255, 150, 60, 0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Холодное лунное свечение (бело-голубое) — для луны и её отражения на воде.
+ *  Отдельная текстура: makeGlowTexture тёплая (фонарь), и луна выходила оранжевой. */
+function makeMoonTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 62);
+  grad.addColorStop(0, 'rgba(232, 240, 255, 0.7)');
+  grad.addColorStop(0.35, 'rgba(200, 220, 255, 0.32)');
+  grad.addColorStop(0.7, 'rgba(170, 200, 245, 0.10)');
+  grad.addColorStop(1, 'rgba(170, 200, 245, 0)');
   g.fillStyle = grad;
   g.fillRect(0, 0, 128, 128);
   const tex = new THREE.CanvasTexture(c);
@@ -391,6 +425,7 @@ export class World {
     depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
   private theme: WorldTheme;
+  private propSet: PropSetId = 'province'; // словарь декора чанка (сюр-спуск)
   private poolMat = new THREE.MeshBasicMaterial({
     map: makeGlowTexture(), transparent: true, opacity: 0.85,
     depthWrite: false, blending: THREE.AdditiveBlending,
@@ -403,9 +438,24 @@ export class World {
   private glowGeo = (() => { const g = new THREE.PlaneGeometry(8.5, 11); g.rotateX(-Math.PI / 2); return g; })();
   private patchGeo = (() => { const g = new THREE.PlaneGeometry(1, 1); g.rotateX(-Math.PI / 2); return g; })();
   // зимний двор: ели, голые деревья, гаражи, киоски
-  private firGeo = new THREE.ConeGeometry(1.5, 3.6, 7);
+  // ЯРУСНАЯ ель: 3 конуса-яруса (убывают кверху) + тонкий ствол — силуэт «ёлки»,
+  // а не гладкий шип. Центрируем по высоте (как старый одиночный конус).
+  private firGeo = (() => {
+    const cone = (r: number, h: number, y: number) => {
+      const g = new THREE.ConeGeometry(r, h, 7); g.translate(0, y, 0); return g;
+    };
+    const trunk = new THREE.CylinderGeometry(0.12, 0.16, 0.7, 5); trunk.translate(0, -0.25, 0);
+    const g = mergeGeometries([
+      cone(1.5, 1.8, 0.9),   // нижний ярус (широкий)
+      cone(1.15, 1.7, 1.85), // средний
+      cone(0.82, 1.6, 2.95), // верхний (узкий)
+      trunk,
+    ], false);
+    g.translate(0, -1.6, 0); // центр примерно по середине кроны (под старую посадку)
+    return g;
+  })();
   private firMat = new THREE.MeshLambertMaterial({ color: 0x1d2b22 });
-  private firSnowGeo = new THREE.ConeGeometry(1.1, 1.6, 7);
+  private firSnowGeo = new THREE.ConeGeometry(0.95, 1.4, 7);
   private firSnowMat = new THREE.MeshLambertMaterial({ color: 0x77808c });
   private trunkGeo = new THREE.CylinderGeometry(0.09, 0.14, 2.4, 5);
   private trunkMat = new THREE.MeshLambertMaterial({ color: 0x2a2520 });
@@ -425,6 +475,28 @@ export class World {
   private stopLightMat = new THREE.MeshStandardMaterial({
     color: 0xdfe8ff, emissive: 0xbcd0ff, emissiveIntensity: 1.1,
   });
+  // светящиеся грибы (вместо фонарей в лесу): бледная ножка + неоновая шляпка
+  private mushStemGeo = new THREE.CylinderGeometry(0.1, 0.17, 1.0, 6);
+  private mushStemMat = new THREE.MeshLambertMaterial({ color: 0xd8d2c0 });
+  private mushCapGeo = new THREE.SphereGeometry(0.62, 12, 7, 0, Math.PI * 2, 0, Math.PI / 2);
+  private mushCapMat = new THREE.MeshStandardMaterial({
+    color: 0x88ffa0, emissive: 0x66ff88, emissiveIntensity: 1.8,
+  });
+  // бэкрумсы: жёлтые обои-стены, потолочные плиты, офисные люминесцентные лампы
+  private wallGeo = new THREE.BoxGeometry(0.3, 5.6, 6);
+  private wallMat = new THREE.MeshStandardMaterial({
+    color: 0xbfa83f, emissive: 0x3a3413, emissiveIntensity: 0.35, roughness: 1,
+  });
+  private ceilGeo = new THREE.BoxGeometry(22, 0.2, 6);
+  private ceilMat = new THREE.MeshLambertMaterial({ color: 0xcfc7a8 });
+  private fluoroGeo = new THREE.BoxGeometry(3, 0.12, 0.6);
+  private fluoroMat = new THREE.MeshStandardMaterial({
+    color: 0xfff6d8, emissive: 0xfff2c0, emissiveIntensity: 2.4,
+  });
+  // луна: серые камни (геометрию берём от кроны-икосаэдра)
+  private rockMat = new THREE.MeshStandardMaterial({ color: 0x6c6c74, roughness: 1, flatShading: true });
+  // сюр-поле: летающие «штуки» — пастельные эмиссивные орбы (та же икоса-геометрия)
+  private orbMat = new THREE.MeshStandardMaterial({ color: 0xff9ce0, emissive: 0xc060a0, emissiveIntensity: 0.9, flatShading: true });
   private vazColors = [0x6b1220, 0x8a8576, 0x2c3e5c, 0x9aa0a8, 0x2f4a38];
   private garageColors = [0x4a4440, 0x3f4a44, 0x54504a, 0x44424c];
   // пулы инстансов и групп
@@ -435,6 +507,10 @@ export class World {
   private pTrunk!: InstancePool; private pCrown!: InstancePool;
   private pGarage!: InstancePool; private pGarageDoor!: InstancePool;
   private pKiosk!: InstancePool; private pKioskWin!: InstancePool;
+  // сюр-спуск: грибы (лес) + стены/потолок/лампы (бэкрумсы)
+  private pMushStem!: InstancePool; private pMushCap!: InstancePool;
+  private pWall!: InstancePool; private pCeil!: InstancePool; private pFluoro!: InstancePool;
+  private pRock!: InstancePool; private pOrb!: InstancePool; // луна-камни / поле-орбы
   private pBuild!: InstancePool[]; // по виду дома
   private gCar!: GroupPool; private gStop!: GroupPool;
   private strips!: StripPool; // дорога/земля/обочины/тротуары
@@ -444,17 +520,123 @@ export class World {
   private headUsed: boolean[] = [];
   private snow: THREE.Points | null = null;
   private snowVel: Float32Array = new Float32Array(0);
+  private flyVel: Float32Array = new Float32Array(0); // светлячки: vx,vy,vz блужданий
   private SNOW_N: number;
   private readonly SNOW_BOX = new THREE.Vector3(50, 22, 70);
   private hemi: THREE.HemisphereLight;
+  // небо лиричного финала: северное сияние (роща/озеро) + луна (озеро)
+  private aurora: THREE.Mesh | null = null;
+  private moon: THREE.Sprite | null = null;
+  private moonRefl: THREE.Sprite | null = null;
+  private stars: THREE.Points | null = null;
+  private lakeWater: THREE.Mesh | null = null;
+  // ТИТРЫ ФИНАЛА: светящийся «экран» далеко над гладью озера, текст плывёт вверх и
+  // замирает по центру (кино-титры). Холст перерисовывается покадрово (скролл).
+  private credits: THREE.Mesh | null = null;
+  private creditsCanvas: HTMLCanvasElement | null = null;
+  private creditsTex: THREE.CanvasTexture | null = null;
+  private creditsLines: string[] = [];
+  private creditsScroll = 0;   // текущее смещение прокрутки (px по холсту)
+  private creditsTarget = 0;   // конечное смещение (текст по центру) — к нему тормозим
+  private creditsAlpha = 0;    // плавное проявление
   // #16 материалы, пульсирующие по биту (эмиссив окон/фонарей, ореолы)
   private pulseTargets!: { mat: THREE.Material; prop: string; base: number; amp: number }[];
 
+  private weaving = false; // лес/роща: тропа петляет (trailWeave поверх оси дороги)
+  private crashBendOn = false; private crashBendCenter = 0; private crashBendSide = 1;
+  // границы пеших зон в РЕАЛЬНОЙ дистанции [forestStart, groveStart, lakeStart].
+  // Когда заданы — пропсет чанка выбирается ПО ДИСТАНЦИИ (как районы), и зоны
+  // проявляются ВПЕРЕДИ заранее → бесшовный переход (видишь следующую и идёшь к ней).
+  private zones: [number, number, number] | null = null;
+
+  private lakeLevel = 0; // высота плоской глади озера (рельеф у воды выравниваем)
+  // КОНЕЦ ТРОПЫ = берег: на этой дистанции стоит камень и полотно ныряет под воду
+  // (дорога РЕАЛЬНО кончается — нарратор «дальше дороги нет» честен). lakeStart+70
+  // = точка freeze (story.freezeAfter), там игрок и замирает.
+  private lakeEnd = Infinity;
+
+  /** Включить пешие зоны по дистанции (game зовёт на аварии). Разовый rebuild. */
+  setZones(forestStart: number, groveStart: number, lakeStart: number) {
+    this.zones = [forestStart, groveStart, lakeStart];
+    this.lakeLevel = this.hAtBase(-lakeStart); // уровень глади = рельеф на входе в озеро
+    this.lakeEnd = lakeStart + 70;             // = story.lake.freezeAfter (берег/стоп)
+    this.weaving = true;                       // пешая тропа петляет на всём участке
+    if (this.stars) this.stars.visible = true; // звёзды на всю ночь
+    this.rebuild();
+  }
+
+  /** Высота рельефа. В ЗОНЕ ОЗЕРА выравниваем к плоской глади (иначе вода тонет в
+   *  холмах и «озеро посреди леса» не читается). Плавный спуск за ~45 м до берега.
+   *  ЗА КОНЦОМ ТРОПЫ (lakeEnd) полотно круто ныряет под уровень воды — дорога
+   *  обрывается у берега, дальше только гладь. */
+  private hAt(z: number): number {
+    if (!this.zones) return this.hAtBase(z);
+    const dist = -z, ls = this.zones[2];
+    if (dist < ls - 45) return this.hAtBase(z);
+    const k = Math.max(0, Math.min(1, (dist - (ls - 45)) / 45));
+    let h = this.hAtBase(z) * (1 - k) + this.lakeLevel * k;
+    if (dist > this.lakeEnd) {
+      const d = Math.min(1, (dist - this.lakeEnd) / 7);
+      h -= d * 3.4; // ниже глади воды (вода на lakeLevel−1.1) → полотно скрыто водой
+    }
+    return h;
+  }
+
+  /** Пропсет чанка по дистанции. Вход — МИРОВАЯ z (как у dAt), внутри → дистанция. */
+  private zoneAt(z: number): PropSetId {
+    if (!this.zones) return this.propSet;
+    const dist = -z; // мир уходит в -z; дистанция = -z (положительная)
+    const [f, g, l] = this.zones;
+    if (dist >= l) return 'lake';
+    if (dist >= g) return 'grove';
+    if (dist >= f) return 'forest';
+    return 'province';
+  }
+
+  /** Армировать резкий поворот-аварию на дистанции center в сторону side (game зовёт). */
+  setCrashBend(center: number, side: number) {
+    this.crashBendOn = true; this.crashBendCenter = center; this.crashBendSide = side;
+    this.rebuild();
+  }
+
+  /** Убрать изгиб-аварию (после краша) — пешая тропа дальше = ось+петля, без виража. */
+  clearCrashBend() { if (this.crashBendOn) { this.crashBendOn = false; this.rebuild(); } }
+
+  /**
+   * Кривая ПУТИ = ось дороги + изгиб тропы (пешие фазы) + резкий поворот-авария.
+   * Полотно, деревья, декор — всё строится по ней, поэтому дорога РЕАЛЬНО
+   * сворачивает/петляет. В гонке без аварии (weaving=false, crashBendOn=false) = ось.
+   */
+  private cAt(wz: number): number {
+    return this.cAtBase(wz)
+      + (this.weaving ? trailWeave(-wz) : 0)
+      + (this.crashBendOn ? crashBend(-wz, this.crashBendCenter, this.crashBendSide) : 0);
+  }
+
+  // зона ПОЛЯ перед аварией [center, halfRange] (реальная дист): в ней район
+  // принудительно «поле» и дорога 2-полосная — авария всегда в поле.
+  private fieldZone: [number, number] | null = null;
+  /** Включить зону поля перед аварией (game зовёт на подъезде). */
+  setApproachField(center: number, halfRange: number) { this.fieldZone = [center, halfRange]; this.rebuild(); }
+  private inFieldZone(z: number): boolean {
+    if (!this.fieldZone) return false;
+    const dist = -z, [c, r] = this.fieldZone;
+    // от подъезда (c−r) и ДАЛЕКО ЗА апекс (c+780 — вся глубина прорисовки чанков):
+    // ВПЕРЕДИ поворота тоже не должно быть города — иначе при съезде видно дома и
+    // «влетаешь» в них. Только чистое снежное поле, дальше (после краша) — лес.
+    // Деревья леса ставятся по флагу `forest`, а не openField — чаща не пропадает.
+    return dist >= c - r && dist <= c + 780;
+  }
+  /** Тип района (с форсом поля в зоне аварии). */
+  private dAt(z: number): number { return this.inFieldZone(z) ? 1 : this.dAtBase(z); }
+  /** Полосность (поле = 2 полосы в зоне аварии). */
+  private wAt(z: number): number { return this.inFieldZone(z) ? 0 : this.wAtBase(z); }
+
   constructor(
-    private hAt: HeightFn = () => 0,
-    private cAt: CurveFn = () => 0,
-    private wAt: (z: number) => number = () => 0, // полосность дороги (0 — 2 полосы, 1 — 3)
-    private dAt: (z: number) => number = () => 0, // тип района (0 провинция, 1 поле, 2 город)
+    private hAtBase: HeightFn = () => 0,
+    private cAtBase: CurveFn = () => 0,
+    private wAtBase: (z: number) => number = () => 0, // полосность дороги (0 — 2 полосы, 1 — 3)
+    private dAtBase: (z: number) => number = () => 0, // тип района (0 провинция, 1 поле, 2 город)
     theme: WorldTheme = THEMES[0],
   ) {
     this.theme = theme;
@@ -467,7 +649,7 @@ export class World {
 
     this.hemi = new THREE.HemisphereLight(theme.hemiSky, theme.hemiGround, 1.0);
     this.scene.add(this.hemi);
-    const moon = new THREE.DirectionalLight(0x8a96b8, 0.45);
+    const moon = new THREE.DirectionalLight(0xaab4d4, 0.95); // лунный заполняющий свет
     moon.position.set(-30, 60, -20);
     this.scene.add(moon);
 
@@ -496,16 +678,29 @@ export class World {
     this.pPole = mk(this.poleGeo, this.poleMat, 4);
     this.pHead = mk(this.headGeo, this.lampHeadMat, 4);
     this.pCone = mk(this.coneGeo, this.coneMat, 4);
-    this.pGlow = mk(this.glowGeo, this.poolMat, 4);
+    this.pGlow = mk(this.glowGeo, this.poolMat, 8); // больше пятен (грибы гуще в лесу/роще)
     this.pPatch = mk(this.patchGeo, this.snowPatchMat, 8);
-    this.pFir = mk(this.firGeo, this.firMat, 12);
-    this.pFirSnow = mk(this.firSnowGeo, this.firSnowMat, 12);
-    this.pTrunk = mk(this.trunkGeo, this.trunkMat, 12);
-    this.pCrown = mk(this.crownGeo, this.crownMat, 12);
+    // ёмкость деревьев большая: лес-пропсет ставит плотную многорядную стену
+    // (десятки стволов на чанк/сторону). Инстансы дёшевы — это лишь capacity.
+    const TREE_CAP = IS_MOBILE ? 80 : 150; // густой лес/роща — много елей на чанк
+    this.pFir = mk(this.firGeo, this.firMat, TREE_CAP);
+    this.pFirSnow = mk(this.firSnowGeo, this.firSnowMat, TREE_CAP);
+    this.pTrunk = mk(this.trunkGeo, this.trunkMat, TREE_CAP);
+    this.pCrown = mk(this.crownGeo, this.crownMat, TREE_CAP);
     this.pGarage = mk(this.garageGeo, this.garageMat, 6, true);
     this.pGarageDoor = mk(this.garageDoorGeo, this.garageDoorMat, 6);
     this.pKiosk = mk(this.kioskGeo, this.kioskMat, 2);
     this.pKioskWin = mk(this.kioskWinGeo, this.kioskWinMat, 2);
+    // грибы (лес — фонари ~4; поле — летающие, до ~12 на чанк)
+    this.pMushStem = mk(this.mushStemGeo, this.mushStemMat, 12);
+    this.pMushCap = mk(this.mushCapGeo, this.mushCapMat, 12);
+    // луна-камни / поле-орбы (общая икоса-геометрия кроны)
+    this.pRock = mk(this.crownGeo, this.rockMat, IS_MOBILE ? 6 : 10);
+    this.pOrb = mk(this.crownGeo, this.orbMat, IS_MOBILE ? 6 : 10);
+    // бэкрумсы: боковые+поперечные стены, потолок, люминесцентные лампы
+    this.pWall = mk(this.wallGeo, this.wallMat, IS_MOBILE ? 28 : 40);
+    this.pCeil = mk(this.ceilGeo, this.ceilMat, IS_MOBILE ? 8 : 12);
+    this.pFluoro = mk(this.fluoroGeo, this.fluoroMat, IS_MOBILE ? 6 : 8);
     this.pBuild = this.kinds.map((k) => mk(this.boxGeo, k.mats, 10));
     this.gCar = new GroupPool(
       () => buildCar({ color: this.vazColors[Math.floor(Math.random() * this.vazColors.length)], lightsOn: false }),
@@ -519,7 +714,7 @@ export class World {
       { w: 2.4, mat: this.shoulderMat, yOff: 0.012, segs: 16, role: 'edge', side: 1, edgeOff: 1.2 },
       { w: 3.4, mat: this.sidewalkMat, yOff: 0.06, segs: 16, role: 'edge', side: -1, edgeOff: 4.1 },
       { w: 3.4, mat: this.sidewalkMat, yOff: 0.06, segs: 16, role: 'edge', side: 1, edgeOff: 4.1 },
-    ], C, this.scene, this.hAt, this.cAt, this.wAt);
+    ], C, this.scene, (z) => this.hAt(z), (z) => this.cAt(z), (z) => this.wAt(z));
 
     for (let i = 0; i < POOLED_LIGHTS; i++) {
       // конус вниз, угол как у видимого плафона: atan(2.6 / 4.8) ≈ 0.5 рад —
@@ -551,6 +746,171 @@ export class World {
     for (const p of this.pools) p.flush();
 
     this.buildSnow();
+    this.buildSky();
+  }
+
+  /**
+   * Небо лиричного финала: северное сияние (шейдерная аддитивная «занавесь» с
+   * волнами) и луна (спрайт-свечение) + её дорожка-отражение на воде. По умолчанию
+   * скрыты; включаются в setPropSet для рощи/озера. Следуют за камерой в update().
+   */
+  private buildSky() {
+    // --- северное сияние: вертикальная занавесь, волны бегут вбок, верх/низ гаснут
+    const auroraMat = new THREE.ShaderMaterial({
+      // depthTest:true — деревья/рельеф ЗАКРЫВАЮТ сияние по глубине (оно ДАЛЕКО за
+      // ними), depthWrite:false — само не пишет глубину (прозрачный фон неба)
+      transparent: true, depthWrite: false, depthTest: true,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: /* glsl */ `
+        precision mediump float;
+        uniform float uTime; varying vec2 vUv;
+        void main() {
+          // вертикальные «лучи» сияния, медленно дрейфующие вбок
+          float x = vUv.x;
+          float w = sin(x * 22.0 + uTime * 0.35) * 0.5 + sin(x * 47.0 - uTime * 0.22) * 0.3;
+          float curtain = smoothstep(0.30, 1.0, 0.6 + w * 0.4);
+          // вертикальный профиль: яркая нижняя кромка, мягко гаснет кверху
+          float vert = smoothstep(0.0, 0.30, vUv.y) * (1.0 - smoothstep(0.30, 1.0, vUv.y));
+          // ГОРИЗОНТАЛЬНЫЙ профиль: широкая мягкая растушёвка по бокам (плоскость
+          // огромна → края далеко за кадром, видимый кусок без жёсткой кромки)
+          float horiz = smoothstep(0.0, 0.40, vUv.x) * (1.0 - smoothstep(0.60, 1.0, vUv.x));
+          float a = curtain * vert * horiz;
+          // палитра: зелёный низ → бирюза верх
+          vec3 col = mix(vec3(0.25, 1.0, 0.5), vec3(0.2, 0.7, 1.0), vUv.y);
+          gl_FragColor = vec4(col, a * 0.5);
+        }
+      `,
+    });
+    // ОГРОМНАЯ полоса высоко в небе и ДАЛЕКО — края уходят за кадр, видно только
+    // мягкую середину (нет «вырезанного прямоугольника»)
+    this.aurora = new THREE.Mesh(new THREE.PlaneGeometry(1800, 220), auroraMat);
+    this.aurora.frustumCulled = false;
+    this.aurora.visible = false;
+    this.aurora.renderOrder = -10; // в самом заднем фоне (за деревьями)
+    this.scene.add(this.aurora);
+
+    // --- луна: мягкое свечение (спрайт) + её дорожка-отражение на воде
+    const moonMat = new THREE.SpriteMaterial({
+      map: makeMoonTexture(), color: 0xeaf2ff, transparent: true, fog: false, // небо — не туманим
+      opacity: 0.95, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+    });
+    this.moon = new THREE.Sprite(moonMat);
+    this.moon.scale.set(26, 26, 1);
+    this.moon.visible = false;
+    this.moon.renderOrder = -1;
+    this.scene.add(this.moon);
+
+    this.moonRefl = new THREE.Sprite(moonMat.clone());
+    this.moonRefl.scale.set(7, 34, 1); // вытянутая по вертикали дорожка на воде
+    this.moonRefl.material.opacity = 0.35;
+    this.moonRefl.visible = false;
+    this.scene.add(this.moonRefl);
+
+    // --- звёзды: статичное поле высоко в небе (не туманится), следует за камерой
+    const N = IS_MOBILE ? 300 : 700;
+    const sp = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      sp[i * 3] = (Math.random() - 0.5) * 600;
+      sp[i * 3 + 1] = 30 + Math.random() * 120; // высоко
+      sp[i * 3 + 2] = (Math.random() - 0.5) * 600;
+    }
+    const sgeo = new THREE.BufferGeometry();
+    sgeo.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+    this.stars = new THREE.Points(sgeo, new THREE.PointsMaterial({
+      color: 0xeaf0ff, size: 0.7, sizeAttenuation: false, transparent: true,
+      opacity: 0.9, fog: false, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    this.stars.frustumCulled = false;
+    this.stars.visible = false;
+    this.scene.add(this.stars);
+
+    // --- озеро: большая горизонтальная гладь воды (видна впереди на фазе озера)
+    const wgeo = new THREE.PlaneGeometry(900, 900);
+    wgeo.rotateX(-Math.PI / 2);
+    this.lakeWater = new THREE.Mesh(wgeo, new THREE.MeshStandardMaterial({
+      color: 0x1e4a6e, roughness: 0.15, metalness: 0.6, // зеркальнее → блеск луны/неба
+    }));
+    this.lakeWater.visible = false;
+    this.scene.add(this.lakeWater);
+  }
+
+  /** Публично переключить небо (сияние/луна/звёзды/вода) под фазу — для бесшовного
+   *  пути цвета/пропы идут через zones+theme, а небо переключаем явно. */
+  updateSky(id: PropSetId) { this.propSet = id; this.skyFor(id); }
+
+  /**
+   * Запустить ФИНАЛЬНЫЕ ТИТРЫ: светящийся «экран» далеко над гладью озера. Текст
+   * всплывает снизу вверх и мягко замирает по центру (кино-титры над водой). game
+   * зовёт через ~15 c после того, как встал на камень. lines — готовые строки.
+   */
+  showCredits(lines: string[]) {
+    this.creditsLines = lines;
+    if (!this.creditsCanvas) {
+      const c = document.createElement('canvas');
+      c.width = 1024; c.height = 1024;
+      this.creditsCanvas = c;
+      this.creditsTex = new THREE.CanvasTexture(c);
+      this.creditsTex.colorSpace = THREE.SRGBColorSpace;
+      const mat = new THREE.MeshBasicMaterial({
+        // depthTest:true — человечек (ближе) ЗАКРЫВАЕТ титры собой (он на первом плане,
+        // надпись — далеко над водой за ним)
+        map: this.creditsTex, transparent: true, fog: false,
+        depthWrite: false, depthTest: true, opacity: 0,
+      });
+      this.credits = new THREE.Mesh(new THREE.PlaneGeometry(52, 52), mat);
+      this.credits.frustumCulled = false;
+      this.credits.renderOrder = 6; // поверх неба/воды
+      this.scene.add(this.credits);
+    }
+    this.creditsScroll = -620; // старт: текст ниже центра (поедет вверх)
+    this.creditsTarget = 0;    // финиш: блок по центру экрана
+    this.creditsAlpha = 0;
+    if (this.credits) this.credits.visible = true;
+    this.drawCredits();
+  }
+
+  /** Перерисовать холст титров под текущий скролл (текст со свечением). */
+  private drawCredits() {
+    const c = this.creditsCanvas, tex = this.creditsTex;
+    if (!c || !tex) return;
+    const ctx = c.getContext('2d')!;
+    const W = c.width, H = c.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(180,220,255,0.9)';
+    ctx.shadowBlur = 22;
+    const cx = W / 2, lineH = 104;
+    const total = this.creditsLines.length * lineH;
+    // блок чуть ВЫШE центра холста (×0.46) — на экране все строки над водой/горизонтом
+    const startY = H * 0.46 - total / 2 + lineH / 2 - this.creditsScroll;
+    this.creditsLines.forEach((ln, i) => {
+      const y = startY + i * lineH;
+      if (y < -lineH || y > H + lineH) return; // вне холста — пропустить
+      const big = i === 0; // заголовок крупнее
+      const sign = i === this.creditsLines.length - 1; // подпись
+      ctx.font = `${big ? 700 : 400} ${big ? 72 : sign ? 54 : 48}px Georgia, serif`;
+      ctx.fillStyle = 'rgba(236,244,255,0.97)';
+      ctx.fillText(ln, cx, y);
+    });
+    tex.needsUpdate = true;
+  }
+
+  /** Показать/скрыть небо финала под текущий пропсет. */
+  private skyFor(id: PropSetId) {
+    const night = id === 'grove' || id === 'lake' || id === 'forest';
+    const showAurora = id === 'grove' || id === 'lake';
+    const showMoon = id === 'lake';
+    if (this.aurora) this.aurora.visible = showAurora;
+    if (this.moon) this.moon.visible = showMoon;
+    if (this.moonRefl) this.moonRefl.visible = showMoon;
+    if (this.stars) this.stars.visible = night; // звёзды всю ночь (лес/роща/озеро)
+    if (this.lakeWater) this.lakeWater.visible = id === 'lake'; // гладь воды — только озеро
   }
 
   /** Остановка: задняя стенка, крыша, лавка, холодная лампа (общие материалы). */
@@ -580,6 +940,15 @@ export class World {
    * осадков. Чанки и геометрия не трогаются — мгновенно и без рывка.
    */
   applyTheme(theme: WorldTheme) {
+    this.applyThemeColors(theme);
+    this.buildSnow(); // ручной своп (клавиша 0/новизна) всегда пересобирает осадки
+  }
+
+  /**
+   * Дешёвый путь свопа палитры БЕЗ пересборки осадков — для покадрового лерпа
+   * темы в сюжетном спуске (story.ts). Только setHex/lerp, ноль аллокаций.
+   */
+  applyThemeColors(theme: WorldTheme) {
     this.theme = theme;
     const fog = this.scene.fog as THREE.Fog;
     fog.color.setHex(theme.fog);
@@ -594,8 +963,81 @@ export class World {
     this.coneMat.color.setHex(theme.lamp);
     this.poolMat.color.setHex(theme.lamp).lerp(new THREE.Color(0xffffff), 0.3);
     for (const l of this.pooled) l.color.setHex(theme.lamp);
-    this.buildSnow();
+    // плавный кросс-фейд пола/полотна/воды (пешие зоны) — лерп через лерп-темы
+    if (theme.floor !== undefined) {
+      this.groundMat.color.setHex(theme.floor);
+      this.sidewalkMat.color.setHex(theme.floor);
+      this.shoulderMat.color.setHex(theme.path ?? theme.floor);
+      this.roadMat.color.setHex(theme.path ?? theme.floor);
+      this.roadMat.roughness = 1;
+      // ЛЕНТА ТРОПЫ: слабый эмиссив полотна (лес/роща) — тропа светится в темноте,
+      // видно куда идти; в гонке/прочих темах pathGlow нет → не светится
+      this.roadMat.emissive.setHex(theme.pathGlow ?? 0x000000);
+      this.roadMat.emissiveIntensity = theme.pathGlow ? 1 : 0;
+      if (this.lakeWater && theme.water !== undefined) {
+        (this.lakeWater.material as THREE.MeshStandardMaterial).color.setHex(theme.water);
+      }
+    }
   }
+
+  /**
+   * Сменить набор пропов (сюр-спуск). Перекрашивает полотно (асфальт→земля для
+   * леса) и ПЕРЕСОБИРАЕТ чанки под новый словарь декора. Дорого, но разово на
+   * сломе фазы — не в кадре. Идемпотентно: тот же id — no-op.
+   */
+  setPropSet(id: PropSetId) {
+    if (id === this.propSet) return;
+    this.propSet = id;
+    if (id === 'forest') {
+      // лес: ВИДИМАЯ грунтовая дорога (светлая, подсвечена) + мшистый пол по бокам.
+      // Дорога петляет (weaving) — деревья идут вдоль неё.
+      this.roadMat.color.setHex(0x4a3a22); this.roadMat.roughness = 1; // грунтовка — светлее пола
+      this.groundMat.color.setHex(0x223428); // мшистый пол (видно при лунном hemi)
+      this.shoulderMat.color.setHex(0x3a2e1a);
+      this.sidewalkMat.color.setHex(0x223428);
+    } else if (id === 'backrooms') {
+      // пол → старый сырой ковёр (грязно-горчичный), без разметки
+      this.roadMat.color.setHex(0x5c4f2e); this.roadMat.roughness = 1;
+      this.groundMat.color.setHex(0x4a4022);
+      this.shoulderMat.color.setHex(0x554a28);
+      this.sidewalkMat.color.setHex(0x4a4022);
+    } else if (id === 'moon') {
+      // лунный реголит — серая пыль, тусклое полотно-тропа
+      this.roadMat.color.setHex(0x3a3a40); this.roadMat.roughness = 1;
+      this.groundMat.color.setHex(0x2a2a30);
+      this.shoulderMat.color.setHex(0x33333a);
+      this.sidewalkMat.color.setHex(0x2a2a30);
+    } else if (id === 'field') {
+      // сюр-поле — пастельная трава, мягкая тропа
+      this.roadMat.color.setHex(0x4a4a6a); this.roadMat.roughness = 1;
+      this.groundMat.color.setHex(0x3a5a48);
+      this.shoulderMat.color.setHex(0x44486a);
+      this.sidewalkMat.color.setHex(0x3a5a48);
+    } else if (id === 'grove') {
+      // роща: та же видимая грунтовая дорога (петляет), пол синее/живее под сиянием
+      this.roadMat.color.setHex(0x4a3e26); this.roadMat.roughness = 1; // грунтовка
+      this.groundMat.color.setHex(0x223440); // мшисто-синий пол
+      this.shoulderMat.color.setHex(0x3a3220);
+      this.sidewalkMat.color.setHex(0x223440);
+    } else if (id === 'lake') {
+      // озеро: тропа-берег (видна) + «земля» вокруг = вода, осветлённая под луной
+      this.roadMat.color.setHex(0x39402c); this.roadMat.roughness = 1; // песчаный берег
+      this.groundMat.color.setHex(0x12283e); // лунная гладь воды (видно)
+      this.shoulderMat.color.setHex(0x333a28);
+      this.sidewalkMat.color.setHex(0x12283e);
+    } else {
+      this.roadMat.color.setHex(0x1a1b20); this.roadMat.roughness = 0.85;
+      this.groundMat.color.setHex(0x17181d);
+      this.shoulderMat.color.setHex(0x3a3835);
+      this.sidewalkMat.color.setHex(0x2c2d31);
+    }
+    this.weaving = id === 'forest' || id === 'grove'; // петляющая тропа на пеших фазах
+    this.skyFor(id); // сияние/луна — для рощи/озера
+    this.rebuild();
+  }
+
+  /** Пересобрать осадки под текущую тему (после applyThemeColors сменившего precip). */
+  refreshPrecip() { this.buildSnow(); }
 
   /** (Пере)собрать осадки по текущей теме: снег пушистый / дождь быстрый. */
   private buildSnow() {
@@ -605,22 +1047,52 @@ export class World {
       (this.snow.material as THREE.Material).dispose();
     }
     const base = IS_MOBILE ? 700 : 1600;
-    this.SNOW_N = this.theme.precip === 'clear' ? Math.round(base * 0.25) : base;
+    const isStars = this.theme.precip === 'stars';
+    const isFlies = this.theme.precip === 'fireflies';
+    this.SNOW_N = isFlies ? Math.round(base * 0.22)
+      : this.theme.precip === 'clear' ? Math.round(base * 0.25) : base;
     const isRain = this.theme.precip === 'rain';
     const pos = new Float32Array(this.SNOW_N * 3);
-    this.snowVel = new Float32Array(this.SNOW_N * 2); // vy, фаза покачивания
+    this.snowVel = new Float32Array(this.SNOW_N * 2);
+    // светлячки: 6 чисел на жука — [дрейфX,Y,Z (постоянный, не гаснет), джиттерX,Y,Z]
+    // + per-vertex яркость (мигание). Дрейф даёт реальное путешествие в разные
+    // стороны на разной глубине/высоте, джиттер — живое дрожание поверх.
+    this.flyVel = isFlies ? new Float32Array(this.SNOW_N * 6) : new Float32Array(0);
+    const cols = isFlies ? new Float32Array(this.SNOW_N * 3) : null;
     for (let i = 0; i < this.SNOW_N; i++) {
       pos[i * 3] = (Math.random() - 0.5) * this.SNOW_BOX.x;
-      pos[i * 3 + 1] = Math.random() * this.SNOW_BOX.y;
-      pos[i * 3 + 2] = 15 - Math.random() * this.SNOW_BOX.z;
-      this.snowVel[i * 2] = isRain ? 9 + Math.random() * 5 : 1.6 + Math.random() * 1.8;
-      this.snowVel[i * 2 + 1] = Math.random() * Math.PI * 2;
+      // светлячки разбросаны по высоте 0.5..8 м (не «один слой»)
+      pos[i * 3 + 1] = isFlies ? 0.5 + Math.random() * 7.5 : Math.random() * this.SNOW_BOX.y;
+      pos[i * 3 + 2] = isFlies ? 15 - Math.random() * this.SNOW_BOX.z : 15 - Math.random() * this.SNOW_BOX.z;
+      if (isFlies) {
+        // постоянный медленный дрейф в случайную сторону (~0.35..0.85 м/с)
+        const a = Math.random() * Math.PI * 2, sp = 0.35 + Math.random() * 0.5;
+        this.flyVel[i * 6] = Math.cos(a) * sp;
+        this.flyVel[i * 6 + 1] = (Math.random() - 0.5) * 0.45;
+        this.flyVel[i * 6 + 2] = Math.sin(a) * sp;
+        this.flyVel[i * 6 + 3] = 0; this.flyVel[i * 6 + 4] = 0; this.flyVel[i * 6 + 5] = 0; // джиттер
+        this.snowVel[i * 2] = 1.4 + Math.random() * 2.4; // период мигания, сек
+        this.snowVel[i * 2 + 1] = Math.random();         // фаза мигания 0..1
+        if (cols) cols[i * 3] = cols[i * 3 + 1] = cols[i * 3 + 2] = 0; // старт потушен
+      } else {
+        // звёзды неподвижны (vel 0); снег/дождь падают
+        this.snowVel[i * 2] = isStars ? 0 : isRain ? 9 + Math.random() * 5 : 1.6 + Math.random() * 1.8;
+        this.snowVel[i * 2 + 1] = Math.random() * Math.PI * 2;
+      }
     }
     const snowGeo = new THREE.BufferGeometry();
     snowGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    if (cols) snowGeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
     this.snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({
-      color: this.theme.precipColor, size: isRain ? 0.06 : 0.09,
-      transparent: true, opacity: isRain ? 0.55 : 0.85, sizeAttenuation: true,
+      vertexColors: isFlies, // мигание = пер-вершинная яркость (только светлячки)
+      color: this.theme.precipColor,
+      size: isFlies ? 0.24 : isStars ? 0.12 : isRain ? 0.06 : 0.09,
+      transparent: true,
+      opacity: isFlies ? 1.0 : isStars ? 0.95 : isRain ? 0.55 : 0.85,
+      sizeAttenuation: true,
+      // светлячки светятся (аддитив), всегда поверх тумана
+      blending: isFlies ? THREE.AdditiveBlending : THREE.NormalBlending,
+      depthWrite: !isFlies,
     }));
     this.snow.frustumCulled = false;
     this.scene.add(this.snow);
@@ -636,6 +1108,20 @@ export class World {
     const chunkZ = -index * CHUNK_LEN;
     // район по дистанции (провинция/поле/город) — задаёт застройку И ширину дороги
     const bm = DISTRICTS[this.dAt(chunkZ - CHUNK_LEN / 2)] ?? DISTRICTS[0];
+    // ПРОПСЕТ ЧАНКА — ПО ДИСТАНЦИИ (если включены зоны), иначе глобальный. Так
+    // лес/роща/озеро проявляются ВПЕРЕДИ заранее и наступают бесшовно при рециклинге.
+    const ps = this.zoneAt(chunkZ - CHUNK_LEN / 2);
+    const forest = ps === 'forest'; // чаща: дома прочь, стена деревьев
+    const backrooms = ps === 'backrooms'; // комнаты: жёлтые стены/потолок
+    const moon = ps === 'moon'; // лунный грунт + звёзды + редкие камни
+    const field = ps === 'field'; // сюр-поле: летающие грибы/штуки
+    const grove = ps === 'grove'; // роща: редкие высокие деревья + светлячки
+    const lake = ps === 'lake';   // озеро: редкие деревья у берега, гладь воды
+    const province = ps === 'province';
+    const bare = !province; // нет городского декора (дома/гаражи/киоски/фонари)
+    // зона подъезда к аварии = ОТКРЫТОЕ ПОЛЕ: никаких домов/гаражей/киосков, чтобы
+    // при съезде с трассы не влетать в здание — только поле/деревья/снег.
+    const openField = this.inFieldZone(chunkZ - CHUNK_LEN / 2);
     chunk.lampHeads.length = 0;
 
     // полотно дороги/земли/обочин/тротуаров (следует рельефу + ширине полос)
@@ -659,8 +1145,9 @@ export class World {
     const yawAt = (wz: number) => Math.atan2(this.cAt(wz + 2) - this.cAt(wz - 2), 4);
     const pitchAt = (wz: number) => -Math.atan2(this.hAt(wz + 2) - this.hAt(wz - 2), 4);
 
-    // прерывистая осевая, местами стёртая; на шоссе — ещё 2 разделителя полос
-    for (let z = 2; z < CHUNK_LEN; z += 6) {
+    // прерывистая осевая, местами стёртая; на шоссе — ещё 2 разделителя полос.
+    // в лесу/бэкрумсах разметки нет — грунтовка/ковёр (пропускаем, слоты прячутся).
+    for (let z = 2; !bare && z < CHUNK_LEN; z += 6) {
       if (Math.random() < 0.2) continue;
       const wz = chunkZ - z;
       const cx = this.cAt(wz), y = this.hAt(wz) + 0.05;
@@ -674,8 +1161,8 @@ export class World {
       }
     }
 
-    // пятна снега на обочинах
-    for (let i = 0; i < 7; i++) {
+    // пятна снега на обочинах (только город — не на грунтовке/ковре)
+    for (let i = 0; !bare && i < 7; i++) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const wz = chunkZ - Math.random() * CHUNK_LEN;
       const sxw = 0.8 + Math.random() * 2.2, szl = 1.2 + Math.random() * 3;
@@ -683,19 +1170,107 @@ export class World {
         this.hAt(wz) + 0.075, wz, 0, sxw, 1, szl);
     }
 
-    // фонари в шахматном порядке
-    for (let z = LAMP_SPACING / 2; z < CHUNK_LEN; z += LAMP_SPACING) {
-      const s = (Math.floor(z / LAMP_SPACING) + index) % 2 === 0 ? -1 : 1;
+    // освещение в шахматном порядке: город — фонари; лес — светящиеся грибы.
+    // бэкрумсы/луна/поле без уличного света (потолочные лампы/звёзды/небо).
+    // лес/роща: грибы-маяки ГУЩЕ (каждые ~12 м у кромки) — цепочка света ведёт по тропе
+    const LAMP_STEP = (forest || grove) ? 12 : LAMP_SPACING;
+    for (let z = LAMP_STEP / 2; (province || forest || grove) && z < CHUNK_LEN; z += LAMP_STEP) {
+      const s = (Math.floor(z / LAMP_STEP) + index) % 2 === 0 ? -1 : 1;
       const wz = chunkZ - z;
       const cx = this.cAt(wz);
-      const x = s * (edge(wz) + 0.9) + cx;
-      const hx = x - s * 0.55; // головка нависает над дорогой
       const h = this.hAt(wz);
-      put(this.pPole, x, h + 2.7, wz);
-      put(this.pHead, hx, h + 5.35, wz);
-      put(this.pCone, hx, h + 3.0, wz);
-      put(this.pGlow, hx, h + 0.05, wz, 0, 1, 1, 1, undefined, pitchAt(wz));
-      chunk.lampHeads.push(new THREE.Vector3(hx, h + 5.1, wz));
+      if (forest || grove) {
+        // гриб у самой кромки: ножка + неоновая шляпка, мягкое пятно под ним
+        const gx = s * (edge(wz) + 0.7) + cx;
+        const gs = 0.8 + Math.random() * 1.4; // разнобой размера
+        put(this.pMushStem, gx, h + 0.5 * gs, wz, 0, gs, gs, gs);
+        put(this.pMushCap, gx, h + 1.0 * gs, wz, 0, gs, gs, gs);
+        put(this.pGlow, gx, h + 0.05, wz, 0, 0.5, 0.5, 0.5, undefined, pitchAt(wz));
+        chunk.lampHeads.push(new THREE.Vector3(gx, h + 1.0 * gs, wz));
+      } else {
+        const x = s * (edge(wz) + 0.9) + cx;
+        const hx = x - s * 0.55; // головка нависает над дорогой
+        put(this.pPole, x, h + 2.7, wz);
+        put(this.pHead, hx, h + 5.35, wz);
+        put(this.pCone, hx, h + 3.0, wz);
+        put(this.pGlow, hx, h + 0.05, wz, 0, 1, 1, 1, undefined, pitchAt(wz));
+        chunk.lampHeads.push(new THREE.Vector3(hx, h + 5.1, wz));
+      }
+    }
+
+    // БЭКРУМСЫ: едешь из комнаты в комнату. Жёлтые стены по бокам (ширина комнаты
+    // варьируется — разные планировки), потолок с люминесцентными лампами, и
+    // поперечные перегородки-проёмы (переход в следующую комнату).
+    if (backrooms) {
+      const SEG = 6;
+      // ширина комнаты варьируется по «комнатам» (каждые ~2 чанка) — детермин. хеш
+      const roomSeed = Math.floor((index * CHUNK_LEN) / 96);
+      const rh = Math.abs(Math.sin(roomSeed * 12.9898) * 43758.5453) % 1;
+      const roomW = 6.5 + rh * 4.5; // 6.5..11
+      for (let z = -SEG / 2; z > -CHUNK_LEN; z -= SEG) {
+        const wz = chunkZ + z;
+        const cx = this.cAt(wz), h = this.hAt(wz), ry = yawAt(wz);
+        for (const s of [-1, 1]) put(this.pWall, cx + s * roomW, h + 2.8, wz, ry); // боковые стены
+        put(this.pCeil, cx, h + 5.5, wz, ry); // потолочная плита
+        // лампы «как попало» (backrooms): не на каждой плите
+        if (Math.floor(z / SEG) % 2 === 0 && rh > 0.15) {
+          put(this.pFluoro, cx, h + 5.3, wz, ry);
+          chunk.lampHeads.push(new THREE.Vector3(cx, h + 5.0, wz));
+        }
+      }
+      // перегородка-проём поперёк дороги — «дверь» в следующую комнату
+      if (index % 2 === 0) {
+        const wz = chunkZ - CHUNK_LEN * 0.5;
+        const cx = this.cAt(wz), h = this.hAt(wz), ry = yawAt(wz) + Math.PI / 2;
+        for (let i = -3; i <= 3; i++) {
+          const xo = i * 2.2;
+          if (Math.abs(xo) < 3) continue; // проём по центру (~6м) — дорога проходит
+          put(this.pWall, cx + xo, h + 2.8, wz, ry);
+        }
+      }
+    }
+
+    // ЛУНА: редкие серые камни/валуны по обочинам лунного грунта. Небо — звёзды
+    // (precip 'stars'), пустота, гнетущая тишина.
+    if (moon) {
+      for (const s of [-1, 1]) {
+        let z = -Math.random() * 12;
+        while (z > -CHUNK_LEN) {
+          z -= 10 + Math.random() * 22;
+          const wz = chunkZ + z;
+          const x = s * (edge(wz) + 2 + Math.random() * 18) + this.cAt(wz);
+          const sc = 0.6 + Math.random() * 2.4; // от гальки до валуна
+          put(this.pRock, x, this.hAt(wz) + sc * 0.5, wz, Math.random() * 6, sc, sc * 0.8, sc);
+        }
+      }
+    }
+
+    // СЮР-ПОЛЕ: над пастельной травой ВИСЯТ предметы — светящиеся грибы-гиганты,
+    // пастельные орбы и редкие здания/Лады в неверном масштабе/перевёрнутые.
+    if (field) {
+      for (const s of [-1, 1]) {
+        let z = -Math.random() * 8;
+        while (z > -CHUNK_LEN) {
+          z -= 6 + Math.random() * 10;
+          const wz = chunkZ + z;
+          const x = s * (edge(wz) + 2 + Math.random() * 20) + this.cAt(wz);
+          const h = this.hAt(wz);
+          const fly = 1.5 + Math.random() * 6; // высота парения
+          const r = Math.random();
+          if (r < 0.5) { // парящий гриб-гигант
+            const gs = 2 + Math.random() * 3;
+            put(this.pMushStem, x, h + fly, wz, Math.random() * 6, gs, gs, gs);
+            put(this.pMushCap, x, h + fly + gs * 0.5, wz, Math.random() * 6, gs, gs, gs);
+          } else if (r < 0.82) { // пастельный орб
+            const os = 0.8 + Math.random() * 2.2;
+            put(this.pOrb, x, h + fly, wz, Math.random() * 6, os, os, os);
+          } else { // «странная штука»: будка-киоск в воздухе, неверный масштаб, вверх ногами
+            const ws = 0.8 + Math.random() * 3; // неверный масштаб
+            put(this.pKiosk, x, h + fly, wz, Math.random() * 6,
+              ws, ws * (Math.random() < 0.5 ? -1 : 1), ws);
+          }
+        }
+      }
     }
 
     // панельки по сторонам. В провинц-режиме отсекаем высотку(4)/ТЦ(5) —
@@ -704,7 +1279,7 @@ export class World {
     const density = bm.build; // <1 — редкая застройка (поле)
     const fieldGap = density < 0.5; // большие просветы между домами
     const buildCur = new Map<number, number>(); // курсор по виду дома
-    for (const s of [-1, 1]) {
+    for (const s of (bare || openField) ? [] : [-1, 1]) { // лес/бэкрумсы/поле-аварии — без домов
       let z = -Math.random() * 14;
       while (z > -CHUNK_LEN) {
         const ki = kinds[Math.floor(Math.random() * kinds.length)];
@@ -734,27 +1309,92 @@ export class World {
       for (let c = buildCur.get(ki) ?? 0; c < pool.perChunk; c++) pool.hide(slot * pool.perChunk + c);
     }
 
-    // деревья вдоль тротуаров и во дворах: ели со снегом + голые (густота по биому)
-    for (const s of [-1, 1]) {
-      let z = -Math.random() * 8;
-      while (z > -CHUNK_LEN) {
-        z -= 9 + Math.random() * 16;
-        if (Math.random() >= bm.tree) continue; // густота деревьев — по биому
-        const wz = chunkZ + z;
-        const x = s * (edge(wz) + 6 + Math.random() * 16) + this.cAt(wz);
-        const h = this.hAt(wz);
-        if (Math.random() < bm.fir) {
-          put(this.pFir, x, h + 1.8, wz);
-          put(this.pFirSnow, x, h + 3.0, wz);
-        } else {
-          put(this.pTrunk, x, h + 1.2, wz);
-          put(this.pCrown, x, h + 2.7, wz, 0, 1, 0.8 + Math.random() * 0.5, 1);
+    if (forest) {
+      // НЕПРОЛАЗНАЯ ЧАЩА: плотная многорядная стена высоких деревьев вплотную к
+      // кромке, уходит вглубь в туман. Высота варьируется (sy) — дикий лес.
+      const ROWS = IS_MOBILE ? 3 : 4;
+      const STEP = IS_MOBILE ? 3.0 : 2.3; // шаг вдоль дороги (плотно)
+      for (const s of [-1, 1]) {
+        let z = -Math.random() * 3;
+        while (z > -CHUNK_LEN) {
+          z -= STEP + Math.random() * 1.8;
+          const wz = chunkZ + z;
+          const h = this.hAt(wz);
+          for (let r = 0; r < ROWS; r++) {
+            const off = edge(wz) + 0.8 + r * 3.2 + Math.random() * 2.2; // 1-й ряд у самой кромки
+            const x = s * off + this.cAt(wz); // cAt уже петляет (weaving) — деревья вдоль тропы
+            const tall = 1.2 + Math.random() * 1.4; // высокие, разнобой
+            if (Math.random() < 0.78) { // в основном ели — тёмный хвойный лес
+              put(this.pFir, x, h + 1.8 * tall, wz, Math.random() * 6, 1, tall, 1);
+              // ЛЕС ПОСЛЕ ЗИМНЕЙ АВАРИИ — снег, но НЕ на всех: шапка лишь на части елей
+              if (Math.random() < 0.45) put(this.pFirSnow, x, h + 3.3 * tall, wz, 0, 1, tall, 1);
+            } else {
+              put(this.pTrunk, x, h + 1.2 * tall, wz, 0, 1, tall, 1);
+              put(this.pCrown, x, h + 2.7 * tall, wz, 0, tall, tall, tall);
+            }
+          }
+        }
+      }
+    } else if (grove) {
+      // РОЩА (зона светлячков): ГУСТОЙ лес — много высоких елей плотными рядами
+      // вдоль тропы. Между стволами вспыхивают светлячки, над кронами — сияние.
+      const ROWS = IS_MOBILE ? 3 : 4;
+      const STEP = IS_MOBILE ? 3.4 : 2.8;
+      for (const s of [-1, 1]) {
+        let z = -Math.random() * 4;
+        while (z > -CHUNK_LEN) {
+          z -= STEP + Math.random() * 2;
+          const wz = chunkZ + z;
+          const h = this.hAt(wz);
+          for (let r = 0; r < ROWS; r++) {
+            const off = edge(wz) + 1.0 + r * 3.0 + Math.random() * 2.2; // от кромки вглубь
+            const x = s * off + this.cAt(wz); // cAt уже петляет (weaving)
+            const tall = 1.3 + Math.random() * 1.4;
+            // РОЩА = зона светлячков, СНЕГА НЕТ → ели без снежных шапок
+            put(this.pFir, x, h + 1.8 * tall, wz, Math.random() * 6, 1, tall, 1);
+          }
+        }
+      }
+    } else if (lake) {
+      // ОЗЕРО: открытая гладь воды — БЕЗ деревьев (они портили «море»). Берег и вода
+      // делают сцену; деревья только густо ПОЗАДИ (у самого входа с тропы), очень редко.
+      // КАМЕНЬ-КОНЕЦ ТРОПЫ: на берегу (lakeEnd) поперёк тропы — большой валун + пара
+      // меньших. Игрок упирается в него и замирает; дальше дороги нет (полотно нырнуло
+      // под воду). Ставим, если конец тропы попадает в этот чанк.
+      const we = -this.lakeEnd;
+      if (we <= chunkZ && we > chunkZ - CHUNK_LEN) {
+        const rx = this.cAt(we), ry = this.hAt(we);
+        // ВАЛУН в конце тропы (по центру, на дистанции lakeEnd): доходишь и ЗАБИРАЕШЬСЯ
+        // на него — там и замираешь над водой. Плосковатый верх (низкий sy) — есть куда
+        // встать. По бокам пара меньших — как каменистый берег.
+        put(this.pRock, rx, ry + 0.55, we, 0.6, 2.4, 1.25, 2.0);          // главный — на него встаём
+        put(this.pRock, rx - 3.4, ry + 0.6, we + 0.6, 2.1, 1.8, 1.3, 1.8); // левый берег
+        put(this.pRock, rx + 3.6, ry + 0.7, we - 0.4, 3.7, 2.0, 1.5, 1.9); // правый берег
+      }
+    } else if (province) {
+      // деревья вдоль тротуаров и во дворах: ели со снегом + голые (густота по биому)
+      for (const s of [-1, 1]) {
+        let z = -Math.random() * 8;
+        while (z > -CHUNK_LEN) {
+          z -= 9 + Math.random() * 16;
+          if (Math.random() >= bm.tree) continue; // густота деревьев — по биому
+          const wz = chunkZ + z;
+          const x = s * (edge(wz) + 6 + Math.random() * 16) + this.cAt(wz);
+          const h = this.hAt(wz);
+          if (Math.random() < bm.fir) {
+            put(this.pFir, x, h + 1.8, wz);
+            // снег на елях — только если в теме идёт снег, и лишь на части деревьев
+            if (this.theme.precip === 'snow' && Math.random() < 0.55) put(this.pFirSnow, x, h + 3.3, wz);
+          } else {
+            put(this.pTrunk, x, h + 1.2, wz);
+            put(this.pCrown, x, h + 2.7, wz, 0, 1, 0.8 + Math.random() * 0.5, 1);
+          }
         }
       }
     }
 
     // ряд гаражей во дворе
-    if (Math.random() < bm.garage) {
+    if (!bare && !openField && Math.random() < bm.garage) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const z0 = -8 - Math.random() * 30;
       const n = 3 + Math.floor(Math.random() * 4);
@@ -770,7 +1410,7 @@ export class World {
     }
 
     // киоск с тёплой витриной
-    if (Math.random() < bm.kiosk) {
+    if (!bare && !openField && Math.random() < bm.kiosk) {
       const s = Math.random() < 0.5 ? -1 : 1;
       const wz = chunkZ - Math.random() * CHUNK_LEN;
       const x = s * (edge(wz) + 7.5) + this.cAt(wz);
@@ -782,7 +1422,7 @@ export class World {
     // остановка (переиспользуемая группа)
     {
       const stopG = this.gStop.at(slot, 0);
-      if (Math.random() < bm.stop) {
+      if (!bare && !openField && Math.random() < bm.stop) {
         const s = Math.random() < 0.5 ? -1 : 1;
         const wz = chunkZ - 10 - Math.random() * (CHUNK_LEN - 20);
         stopG.position.set(s * (edge(wz) + 4.6) + this.cAt(wz), this.hAt(wz), wz);
@@ -794,7 +1434,7 @@ export class World {
 
     // припаркованные жигули у обочины (переиспользуемые группы)
     {
-      const n = Math.random() < bm.parked ? 1 + (Math.random() < 0.3 ? 1 : 0) : 0;
+      const n = !bare && !openField && Math.random() < bm.parked ? 1 + (Math.random() < 0.3 ? 1 : 0) : 0;
       for (let p = 0; p < this.gCar.perChunk; p++) {
         const carG = this.gCar.at(slot, p);
         if (p < n) {
@@ -812,7 +1452,10 @@ export class World {
       if (p === this.pLine || p === this.pPatch || p === this.pPole || p === this.pHead
         || p === this.pCone || p === this.pGlow || p === this.pFir || p === this.pFirSnow
         || p === this.pTrunk || p === this.pCrown || p === this.pGarage || p === this.pGarageDoor
-        || p === this.pKiosk || p === this.pKioskWin) {
+        || p === this.pKiosk || p === this.pKioskWin
+        || p === this.pMushStem || p === this.pMushCap
+        || p === this.pWall || p === this.pCeil || p === this.pFluoro
+        || p === this.pRock || p === this.pOrb) {
         for (let c = cur.get(p) ?? 0; c < p.perChunk; c++) p.hide(slot * p.perChunk + c);
       }
     }
@@ -876,6 +1519,31 @@ export class World {
       } else l.visible = false;
     }
 
+    // небо финала следует за игроком (сияние впереди-вверху, луна высоко, её
+    // отражение — на воде между игроком и далью)
+    if (this.aurora?.visible) {
+      // высоко в небе, но В ПРЕДЕЛАХ far-clip камеры (400) — иначе обрезается и
+      // исчезает. Края шейдер гасит, так что «вырезанной картинки» нет.
+      (this.aurora.material as THREE.ShaderMaterial).uniforms.uTime.value = performance.now() / 1000;
+      this.aurora.position.set(carPos.x, carPos.y + 150, carPos.z - 300);
+    }
+    if (this.moon?.visible) {
+      this.moon.position.set(carPos.x + 42, carPos.y + 70, carPos.z - 260);
+      this.moonRefl?.position.set(carPos.x + 18, carPos.y - 0.6, carPos.z - 55);
+    }
+    if (this.stars?.visible) this.stars.position.set(carPos.x, carPos.y, carPos.z);
+    // озеро: гладь воды НИЖЕ берега и ВПЕРЕДИ (не под ногами — по воде не ходим)
+    if (this.lakeWater?.visible) this.lakeWater.position.set(carPos.x, carPos.y - 1.1, carPos.z - 55);
+
+    // ТИТРЫ: экран висит далеко над водой; текст плавно всплывает к центру и замирает
+    if (this.credits?.visible) {
+      this.creditsScroll += (this.creditsTarget - this.creditsScroll) * Math.min(1, dt * 0.55);
+      this.creditsAlpha = Math.min(1, this.creditsAlpha + dt * 0.35);
+      (this.credits.material as THREE.MeshBasicMaterial).opacity = this.creditsAlpha;
+      this.credits.position.set(carPos.x, carPos.y + 16, carPos.z - 86);
+      this.drawCredits();
+    }
+
     // снег: по x/z хлопья неподвижны, падение с обёрткой бокса вокруг машины
     if (!this.snow) return;
     const attr = this.snow.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -888,14 +1556,56 @@ export class World {
     const yBase = carPos.y - 3; // снежный слой следует за рельефом
     const yTop = yBase + this.SNOW_BOX.y;
     const xMax = xMin + xSpan, zMax = zMin + zSpan;
-    const swayDt = (this.theme.precip === 'rain' ? 0.08 : 0.4) * dt; // инвариант — из цикла
+    if (this.theme.precip === 'fireflies') {
+      // СВЕТЛЯЧКИ — своя физика, ничего общего со снегом: ленивое блуждание
+      // (random-walk скорости с затуханием и клампом) + биолюм. мигание (per-vertex
+      // яркость, низкая скважность вспышки, у каждого свой период/фаза). Низко над
+      // землёй. Бокс едет за игроком — облако всегда вокруг.
+      const colAttr = this.snow.geometry.getAttribute('color') as THREE.BufferAttribute;
+      const cols = colAttr.array as Float32Array;
+      const fyLo = yBase + 0.4, fyHi = yBase + 8.5;
+      const damp = Math.exp(-0.7 * dt); // слабое затухание ДЖИТТЕРА (дрейф не гасим)
+      const ACC = 1.1;                  // сила джиттера поверх дрейфа
+      for (let i = 0; i < this.SNOW_N; i++) {
+        // джиттер — random-walk с затуханием (живое дрожание)
+        let jx = (this.flyVel[i * 6 + 3] + (Math.random() - 0.5) * ACC * dt) * damp;
+        let jy = (this.flyVel[i * 6 + 4] + (Math.random() - 0.5) * ACC * 0.6 * dt) * damp;
+        let jz = (this.flyVel[i * 6 + 5] + (Math.random() - 0.5) * ACC * dt) * damp;
+        this.flyVel[i * 6 + 3] = jx; this.flyVel[i * 6 + 4] = jy; this.flyVel[i * 6 + 5] = jz;
+        // суммарная скорость = ПОСТОЯННЫЙ дрейф + джиттер → реальное путешествие
+        const vx = this.flyVel[i * 6] + jx, vy = this.flyVel[i * 6 + 1] + jy, vz = this.flyVel[i * 6 + 2] + jz;
+        let x = arr[i * 3] + vx * dt;
+        let y = arr[i * 3 + 1] + vy * dt;
+        let z = arr[i * 3 + 2] + vz * dt;
+        if (y < fyLo) { y = fyLo; this.flyVel[i * 6 + 1] = Math.abs(this.flyVel[i * 6 + 1]); } // отскок у земли
+        else if (y > fyHi) { y = fyHi; this.flyVel[i * 6 + 1] = -Math.abs(this.flyVel[i * 6 + 1]); }
+        if (x < xMin) x += xSpan; else if (x >= xMax) x -= xSpan;
+        while (z < zMin) z += zSpan; while (z >= zMax) z -= zSpan;
+        arr[i * 3] = x; arr[i * 3 + 1] = y; arr[i * 3 + 2] = z;
+        // мигание: фаза 0..1 по своему периоду; вспышка короткая (sin^8)
+        let bp = this.snowVel[i * 2 + 1] + dt / this.snowVel[i * 2];
+        if (bp >= 1) bp -= 1;
+        this.snowVel[i * 2 + 1] = bp;
+        const s = Math.max(0, Math.sin(bp * Math.PI * 2));
+        const s2 = s * s, flash = s2 * s2 * s2; // s^6 — мягче, больше горящих разом
+        const b = 0.12 + 0.88 * flash; // заметный фон + вспышка (аддитив)
+        cols[i * 3] = cols[i * 3 + 1] = cols[i * 3 + 2] = b;
+      }
+      colAttr.needsUpdate = true;
+      attr.needsUpdate = true;
+      return;
+    }
+
+    // снег/дождь/звёзды: падение (или 0) с покачиванием, обёртка бокса вокруг машины
+    const swayDt = (this.theme.precip === 'rain' ? 0.08 : 0.4) * dt;
     for (let i = 0; i < this.SNOW_N; i++) {
+      const ph = this.snowVel[i * 2 + 1];
       let y = arr[i * 3 + 1] - this.snowVel[i * 2] * dt;
       if (y < yBase) y += this.SNOW_BOX.y;
       else if (y > yTop) y = yBase + Math.random() * this.SNOW_BOX.y;
       arr[i * 3 + 1] = y;
       // враппинг вычитанием вместо двойного modulo — заметно дешевле на ~1600 частиц
-      let x = arr[i * 3] + Math.sin(t * 1.3 + this.snowVel[i * 2 + 1]) * swayDt;
+      let x = arr[i * 3] + Math.sin(t * 1.3 + ph) * swayDt;
       if (x < xMin) x += xSpan; else if (x >= xMax) x -= xSpan;
       arr[i * 3] = x;
       let z = arr[i * 3 + 2]; // бокс едет за машиной — z перевешиваем относительно него
@@ -912,5 +1622,11 @@ export class World {
     this.gStop.dispose();
     this.strips.dispose();
     if (this.snow) this.snow.geometry.dispose();
+    if (this.aurora) { this.aurora.geometry.dispose(); (this.aurora.material as THREE.Material).dispose(); }
+    if (this.moon) this.moon.material.dispose();
+    if (this.moonRefl) this.moonRefl.material.dispose();
+    if (this.stars) { this.stars.geometry.dispose(); (this.stars.material as THREE.Material).dispose(); }
+    if (this.lakeWater) { this.lakeWater.geometry.dispose(); (this.lakeWater.material as THREE.Material).dispose(); }
+    if (this.credits) { this.credits.geometry.dispose(); (this.credits.material as THREE.Material).dispose(); this.creditsTex?.dispose(); }
   }
 }

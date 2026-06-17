@@ -199,7 +199,25 @@ export class Conductor {
    * музыка/блоки/машина синхронно ускоряются, питч тот же. Плавный рамп.
    */
   setRate(rate: number, dur = 0.3) {
-    this.transport.bpm.rampTo(BASE_BPM * rate, dur);
+    // два rampTo на один и тот же аудио-момент бросают «Start time must be
+    // strictly greater…» (Tone). Защищаемся: рампим не чаще раза на ~16мс.
+    const now = Tone.now();
+    if (now <= this.lastRampT) return;
+    this.lastRampT = now;
+    try { this.transport.bpm.rampTo(BASE_BPM * rate, dur); }
+    catch { /* гонка рампов — безопасно пропустить */ }
+  }
+  private lastRampT = -1;
+
+  /**
+   * Приглушить музыку (мастер-громкость) до db за dur секунд — для лиричного
+   * финала, где музыка-драйв уступает место ночному амбиенту (ambient.ts идёт
+   * мимо мастера, поэтому не глохнет вместе с музыкой). Сайдчейн-дак на стыках
+   * работает относительно текущего уровня и эту рампу не ломает.
+   */
+  duckMusic(db: number, dur = 4) {
+    try { Tone.getDestination().volume.rampTo(db, dur); }
+    catch { /* безопасно пропустить */ }
   }
 
   /**

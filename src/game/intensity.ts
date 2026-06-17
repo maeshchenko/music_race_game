@@ -44,6 +44,14 @@ export class IntensityDirector {
   private refractory = 0;
 
   /**
+   * «Безумие» 0..1 — сюжетный спуск (story.ts). Отдельный медленный скаляр НАД
+   * arousal: гонит крен камеры, глитч-шейдер, дрейф цвета/детюна. Story задаёт
+   * ЦЕЛЬ (setInsanity), здесь плавно лерпим — переходы фаз без ступенек.
+   */
+  insanity = 0;
+  private insanityTarget = 0;
+
+  /**
    * Реестр каналов: правь `.on` (вкл/выкл) и `.gain` (сила, 0..N) у любого —
    * комбинируются свободно. gain=1 — штатно, 0 — выключено, >1 — усилено.
    */
@@ -72,6 +80,9 @@ export class IntensityDirector {
     this.baseline = 0.4 * (1 - Math.exp(-tiers * 0.14));
   }
 
+  /** Цель «безумия» 0..1 (сюжетная фаза). Лерпится в update(). */
+  setInsanity(x: number) { this.insanityTarget = Math.max(0, Math.min(1, x)); }
+
   /** Событийный всплеск возбуждения. s 0..1 (сила события). */
   spark(s: number) {
     const gain = this.refractory > 0 ? 0.4 : 1; // рефрактер: пики не слипаются
@@ -93,6 +104,8 @@ export class IntensityDirector {
     );
     const peak = Math.max(this.excite, live);
     this.arousal = Math.min(1, this.baseline + peak * (1 - this.baseline));
+    // безумие: медленный догон цели (~1.5с на полный ход) — плавный спуск
+    this.insanity += (this.insanityTarget - this.insanity) * Math.min(1, dt * 0.7);
   }
 
   /**
