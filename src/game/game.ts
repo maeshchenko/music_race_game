@@ -161,6 +161,7 @@ export class Game {
   private foreshadowIdx = 0;
   private foreshadowBump = 0;    // transient всплеск insanity для foreshadow (не клобберится покадровым setInsanity)
   private static readonly FORESHADOW_AT = [1500, 2800]; // м: тонкие «волны» до подъезда
+  private fieldArmed = false;    // геометрия поля/поворота заряжена ЗАРАНЕЕ (вкатывается с горизонта рециклингом, без pop)
   private approachStarted = false; // подъезд к аварии: поле + зима наступают
   private approachFromTheme: WorldTheme | null = null; // тема, ИЗ которой к зиме
   private zonesSet = false;      // пешие зоны по дистанции включены (бесшовные переходы)
@@ -1184,7 +1185,7 @@ export class Game {
     if (this.nextNovelty < 0) this.nextNovelty = t + 35 + Math.random() * 20;
     const comfortable = this.combo > 30 && (t - this.lastCrashT) > 22;
     // под сюжетным спуском (фаза ≠ race) и на подъезде к аварии (зима) новизну глушим
-    if (!this.story?.active && !this.approachStarted && !this.paused
+    if (!this.story?.active && !this.fieldArmed && !this.approachStarted && !this.paused
         && (t >= this.nextNovelty || (comfortable && t >= this.nextNovelty - 15))) {
       this.nextNovelty = t + 35 + Math.random() * 20;
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
@@ -1270,23 +1271,30 @@ export class Game {
       dist = this.level.distAt(t);
     }
 
-    // ПОДЪЕЗД К АВАРИИ. За ~450 м до леса: зона становится ПОЛЕМ и наступает
-    // холодная туманная снежная зима; за ~50 м — резкий поворот в дороге (видно
-    // издали, едем прямо и не вписываемся).
+    // ПОДЪЕЗД К АВАРИИ. Геометрию поля/поворота ЗАРЯЖАЕМ СИЛЬНО ЗАРАНЕЕ (~1300 м),
+    // чтобы поле ВКАТЫВАЛОСЬ с горизонта рециклингом чанков, а не подменялось
+    // мгновенно (rebuild стирал/перерисовывал видимую улицу за кадр — рывок). На
+    // этой дистанции в зоне поля ещё НЕТ ни одного видимого чанка (глубина
+    // прорисовки 780 м + смещение зоны 450 м), поэтому rebuild ничего не дёргает,
+    // а дальше поле само проявляется впереди по мере подъезда — бесшовно.
+    // Зима/снег приходят ОТДЕЛЬНО, на последних ~450 м (кросс-фейд палитры ниже).
     if (this.story && !this.walkMode) {
       const m = this.story.metersToForest(dist);
-      if (!this.approachStarted && m > 0 && m < 450) {
-        this.approachStarted = true;
+      if (!this.fieldArmed && m > 0 && m < 1300) {
+        this.fieldArmed = true;
         this.crashArmed = true;
         this.crashSide = Math.random() < 0.5 ? -1 : 1;
         this.crashDist = dist + m;
-        this.approachFromTheme = THEMES[this.themeIndex];
         this.world.setApproachField(this.crashDist, 450); // район = поле, дорога 2 полосы
         this.world.setCrashBend(this.crashDist, this.crashSide);
         // поток едет по той же изогнутой дороге (endless: трафик в сегментах цепочки)
         if (this.endless && this.chain) this.chain.setCrashBend(this.crashDist, this.crashSide);
         else this.traffic.setCrashBend(this.crashDist, this.crashSide);
-
+      }
+      // ЗИМА/СНЕГ — на последних ~450 м (палитра лерпится покадрово, без рывка)
+      if (!this.approachStarted && m > 0 && m < 450) {
+        this.approachStarted = true;
+        this.approachFromTheme = THEMES[this.themeIndex];
         this.world.applyThemeColors(WINTER); // precip → снег
         this.world.refreshPrecip();
       }
