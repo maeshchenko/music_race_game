@@ -18,6 +18,7 @@ export class Runner {
   private torso: THREE.Group;
   private stepIndex = 0; // индекс последнего приземления стопы — для звука шага
   private faceTex: THREE.Texture; // лицо Кейджа на голове (для dispose)
+  private face: THREE.Mesh;       // маска-лицо; по дефолту скрыта, клавиша 9 переключает
 
   constructor() {
     const skin = new THREE.MeshStandardMaterial({ color: 0xddae8a, roughness: 0.75, flatShading: true });
@@ -47,12 +48,13 @@ export class Runner {
       roughness: 0.85, metalness: 0,
       emissive: 0xffffff, emissiveMap: this.faceTex, emissiveIntensity: 0.45, // видно ночью, но не «лампа»
     });
-    const face = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.47), faceMat); // ~аспект 348×482
-    face.position.set(0, 1.76, -0.225); // чуть ПЕРЕД поверхностью шара (radius .21), чтобы не утопал
-    face.rotation.y = Math.PI;        // нормаль в -Z (к фронтальной камере)
+    this.face = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.47), faceMat); // ~аспект 348×482
+    this.face.position.set(0, 1.76, -0.225); // чуть ПЕРЕД поверхностью шара (radius .21), чтобы не утопал
+    this.face.rotation.y = Math.PI;        // нормаль в -Z (к фронтальной камере)
+    this.face.visible = false;             // по дефолту маска ВЫКЛ — включается клавишей 9
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.09, 0.14, 6), skin);
     neck.position.y = 1.56;
-    this.torso.add(trunk, neck, head, face);
+    this.torso.add(trunk, neck, head, this.face);
 
     this.armL = limb(0.14, 0.72, 0.32, 1.48);
     this.armR = limb(0.14, 0.72, -0.32, 1.48);
@@ -64,6 +66,9 @@ export class Runner {
     this.group.add(this.body);
     this.group.visible = false;
   }
+
+  /** Переключить маску-лицо (клавиша 9). */
+  toggleMask(): boolean { this.face.visible = !this.face.visible; return this.face.visible; }
 
   /**
    * Анимация бега. dist — дистанция (м): фаза шага = dist·k, поэтому ноги

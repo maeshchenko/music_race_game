@@ -456,6 +456,11 @@ export class Game {
       this.story.approachForest(400);
       this.pop('⏩ к повороту в лес', 'pop-theme');
     }
+    if (e.code === 'Digit9' || e.code === 'Numpad9') {
+      // маска-лицо человечка: по дефолту выкл, 9 — переключает
+      const on = this.runner?.toggleMask();
+      if (on !== undefined) this.pop(on ? '🎭 маска вкл' : 'маска выкл', 'pop-theme');
+    }
     if (e.code === 'Digit0' || e.code === 'Numpad0') {
       // перебор тем оформления на лету — посмотреть снег/дождь/рассвет/закат
       this.themeIndex = (this.themeIndex + 1) % THEMES.length;
