@@ -1050,7 +1050,7 @@ export class World {
     const base = IS_MOBILE ? 700 : 1600;
     const isStars = this.theme.precip === 'stars';
     const isFlies = this.theme.precip === 'fireflies';
-    this.SNOW_N = isFlies ? Math.round(base * 0.22)
+    this.SNOW_N = isFlies ? Math.round(base * 0.5)
       : this.theme.precip === 'clear' ? Math.round(base * 0.25) : base;
     const isRain = this.theme.precip === 'rain';
     const pos = new Float32Array(this.SNOW_N * 3);
@@ -1588,8 +1588,8 @@ export class World {
         if (bp >= 1) bp -= 1;
         this.snowVel[i * 2 + 1] = bp;
         const s = Math.max(0, Math.sin(bp * Math.PI * 2));
-        const s2 = s * s, flash = s2 * s2 * s2; // s^6 — мягче, больше горящих разом
-        const b = 0.12 + 0.88 * flash; // заметный фон + вспышка (аддитив)
+        const s2 = s * s, flash = s2 * s2; // s^4 — больше горящих разом, мягче спад
+        const b = 0.28 + 0.72 * flash; // заметный фон + вспышка (аддитив)
         cols[i * 3] = cols[i * 3 + 1] = cols[i * 3 + 2] = b;
       }
       colAttr.needsUpdate = true;

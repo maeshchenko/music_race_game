@@ -9,6 +9,166 @@ import * as Tone2 from "tone";
 
 // src/audio/instruments.ts
 import * as Tone from "tone";
+
+// src/audio/samples.ts
+function resolveSampleBase(baseUrl) {
+  const base = import.meta.env?.BASE_URL ?? "/";
+  return base.replace(/\/$/, "") + baseUrl;
+}
+var SAMPLE_SETS = {
+  electricGuitar: {
+    baseUrl: "/samples/guitar-electric/",
+    urls: { E2: "E2.mp3", "F#2": "Fs2.mp3", A2: "A2.mp3", C3: "C3.mp3", "D#3": "Ds3.mp3", "F#3": "Fs3.mp3", A3: "A3.mp3", C4: "C4.mp3" },
+    volumeDb: -12,
+    release: 0.35,
+    distortion: 0.62,
+    cab: { hp: 95, lp: 5200 },
+    // 4x12 cab sim — kills the fizz
+    doubleTrack: true,
+    palmMute: true
+  },
+  electricBass: {
+    baseUrl: "/samples/bass-electric/",
+    urls: { E1: "E1.mp3", G1: "G1.mp3", "A#1": "As1.mp3", "C#2": "Cs2.mp3", E2: "E2.mp3", G2: "G2.mp3", "A#2": "As2.mp3", "C#3": "Cs3.mp3" },
+    volumeDb: -6,
+    release: 0.3,
+    distortion: 0.16,
+    cab: { hp: 40, lp: 3200 },
+    // bass cab — round, no fizz
+    monophonic: true
+  },
+  strings: {
+    baseUrl: "/samples/violin/",
+    urls: { G3: "G3.mp3", C4: "C4.mp3", E4: "E4.mp3", G4: "G4.mp3", C5: "C5.mp3", E5: "E5.mp3", G5: "G5.mp3", C6: "C6.mp3", E6: "E6.mp3", G6: "G6.mp3", C7: "C7.mp3" },
+    volumeDb: -13,
+    release: 0.8,
+    attack: 0.25,
+    vibrato: { rate: 5.2, depth: 0.12 }
+  },
+  violin: {
+    baseUrl: "/samples/violin/",
+    urls: { G3: "G3.mp3", C4: "C4.mp3", E4: "E4.mp3", G4: "G4.mp3", C5: "C5.mp3", E5: "E5.mp3", G5: "G5.mp3", C6: "C6.mp3", A6: "A6.mp3", E6: "E6.mp3", G6: "G6.mp3", C7: "C7.mp3" },
+    volumeDb: -9,
+    release: 0.5,
+    attack: 0.05,
+    vibrato: { rate: 5.8, depth: 0.16 }
+  },
+  // Upright/double bass (noir walking bass) — warm, woody, monophonic.
+  contrabass: {
+    baseUrl: "/samples/contrabass/",
+    urls: { G1: "G1.mp3", "A#1": "As1.mp3", C2: "C2.mp3", D2: "D2.mp3", E2: "E2.mp3", "G#2": "Gs2.mp3", A2: "A2.mp3", "C#3": "Cs3.mp3", E3: "E3.mp3", "G#3": "Gs3.mp3", B3: "B3.mp3" },
+    volumeDb: -7,
+    release: 0.35,
+    attack: 0.01,
+    monophonic: true
+  },
+  // Bowed cello (dark academia bass / chamber). Low register is densely sampled
+  // (≈whole-tone) so notes aren't repitched far — wide stretch on a low string
+  // sounds rubbery/detuned. Vibrato kept subtle so sustained low notes don't wobble.
+  cello: {
+    baseUrl: "/samples/cello/",
+    urls: {
+      C2: "C2.mp3",
+      D2: "D2.mp3",
+      "D#2": "Ds2.mp3",
+      E2: "E2.mp3",
+      F2: "F2.mp3",
+      G2: "G2.mp3",
+      A2: "A2.mp3",
+      B2: "B2.mp3",
+      C3: "C3.mp3",
+      D3: "D3.mp3",
+      E3: "E3.mp3",
+      F3: "F3.mp3",
+      G3: "G3.mp3",
+      A3: "A3.mp3",
+      B3: "B3.mp3",
+      C4: "C4.mp3",
+      E4: "E4.mp3",
+      G4: "G4.mp3",
+      C5: "C5.mp3"
+    },
+    volumeDb: -9,
+    release: 0.6,
+    attack: 0.12,
+    vibrato: { rate: 5, depth: 0.04 }
+  },
+  // Muted (harmon) trumpet — trumpet samples through a nasal mid-band "mute".
+  mutedTrumpet: {
+    baseUrl: "/samples/trumpet/",
+    urls: { A3: "A3.mp3", C4: "C4.mp3", "D#4": "Ds4.mp3", F4: "F4.mp3", G4: "G4.mp3", "A#4": "As4.mp3", D5: "D5.mp3", F5: "F5.mp3", A5: "A5.mp3", C6: "C6.mp3" },
+    volumeDb: -11,
+    release: 0.25,
+    attack: 0.02,
+    cab: { hp: 520, lp: 3400 },
+    // harmon-mute nasal honk
+    vibrato: { rate: 5, depth: 0.07 }
+  },
+  // Vibraphone (noir comping) — soft mallets, long metallic ring.
+  vibraphone: {
+    baseUrl: "/samples/vibraphone/",
+    urls: { C3: "C3.mp3", E3: "E3.mp3", G3: "G3.mp3", B3: "B3.mp3", D4: "D4.mp3", F4: "F4.mp3", A4: "A4.mp3", C5: "C5.mp3", E5: "E5.mp3" },
+    volumeDb: -10,
+    release: 1.2,
+    attack: 0
+  }
+};
+var REAL_PROGRAM_MAP = {
+  30: "electricGuitar",
+  34: "electricBass",
+  48: "strings",
+  40: "violin",
+  32: "contrabass",
+  // upright bass (noir)
+  42: "cello",
+  // bowed cello (dark academia)
+  59: "mutedTrumpet",
+  // noir soloist
+  11: "vibraphone"
+  // noir comping
+  // program 6 (harpsichord, dark academia) has no CC sample source → stays synth
+};
+var L = (vMax, ...rr) => ({ vMax, rr });
+var REAL_DRUM_KITS = {
+  nightcorerun: {
+    baseUrl: "/samples/drums/metal/",
+    lanes: {
+      kick: { layers: [
+        L(0.5, "kick_l0_r0.mp3", "kick_l0_r1.mp3"),
+        L(0.8, "kick_l1_r0.mp3", "kick_l1_r1.mp3"),
+        L(1, "kick_l2_r0.mp3", "kick_l2_r1.mp3")
+      ] },
+      snare: { layers: [
+        L(0.5, "snare_l0_r0.mp3", "snare_l0_r1.mp3"),
+        L(0.8, "snare_l1_r0.mp3", "snare_l1_r1.mp3"),
+        L(1, "snare_l2_r0.mp3", "snare_l2_r1.mp3")
+      ] },
+      hatClosed: { layers: [
+        L(0.45, "hatClosed_l0_r0.mp3", "hatClosed_l0_r1.mp3"),
+        L(0.75, "hatClosed_l1_r0.mp3", "hatClosed_l1_r1.mp3"),
+        L(1, "hatClosed_l2_r0.mp3", "hatClosed_l2_r1.mp3")
+      ] },
+      hatOpen: { layers: [L(1, "hatOpen_l0_r0.mp3", "hatOpen_l0_r1.mp3")] },
+      crash: { layers: [
+        L(0.35, "crash_l0_r0.mp3"),
+        L(0.6, "crash_l1_r0.mp3"),
+        L(0.85, "crash_l2_r0.mp3"),
+        L(1, "crash_l3_r0.mp3")
+      ] },
+      tomHigh: { layers: [
+        L(0.6, "tomHigh_l0_r0.mp3", "tomHigh_l0_r1.mp3"),
+        L(1, "tomHigh_l1_r0.mp3", "tomHigh_l1_r1.mp3")
+      ] },
+      tomLow: { layers: [
+        L(0.6, "tomLow_l0_r0.mp3", "tomLow_l0_r1.mp3"),
+        L(1, "tomLow_l1_r0.mp3", "tomLow_l1_r1.mp3")
+      ] },
+      clap: { layers: [L(1, "clap_l0_r0.mp3", "clap_l0_r1.mp3", "clap_l0_r2.mp3", "clap_l0_r3.mp3")] }
+    }
+  }
+};
+
+// src/audio/instruments.ts
 var midiHz = (pitch) => 440 * 2 ** ((pitch - 69) / 12);
 function makeChorus(depth = 0.7, rate = 0.8) {
   const ch = new Tone.Chorus(rate, 3.5, depth);
@@ -21,6 +181,15 @@ function monoGuard(trigger) {
     if (t <= last + 2e-3) t = last + 2e-3;
     last = t;
     trigger(p, t, d, v);
+  };
+}
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
 function makeSquareLead(out, bpm) {
@@ -253,7 +422,7 @@ function makeStrings(out, solo) {
     oscillator: { type: "sawtooth" },
     envelope: { attack: solo ? 0.08 : 0.35, decay: 0.3, sustain: 0.8, release: solo ? 0.3 : 0.9 }
   });
-  synth.volume.value = solo ? -8 : -16;
+  synth.volume.value = solo ? -4 : -16;
   const filter = new Tone.Filter(solo ? 3200 : 2200, "lowpass");
   const vibrato = new Tone.Vibrato(5, solo ? 0.15 : 0.06);
   synth.chain(filter, vibrato, out);
@@ -367,7 +536,7 @@ function makeSupersawLead(out, bpm) {
     oscillator: { type: "fatsawtooth", count: 3, spread: 24 },
     envelope: { attack: 0.01, decay: 0.12, sustain: 0.7, release: 0.15 }
   });
-  synth.volume.value = -9;
+  synth.volume.value = -5;
   const filter = new Tone.Filter(5200, "lowpass");
   const delay = new Tone.FeedbackDelay(60 / bpm / 2, 0.3);
   delay.wet.value = 0.22;
@@ -390,7 +559,7 @@ function makeColdLead(out, bpm) {
     filter: { type: "lowpass", Q: 1.5 },
     filterEnvelope: { attack: 0.02, decay: 0.2, sustain: 0.6, release: 0.3, baseFrequency: 700, octaves: 2 }
   });
-  synth.volume.value = -10;
+  synth.volume.value = -5;
   const chorus = makeChorus(0.8, 0.7);
   const delay = new Tone.FeedbackDelay(60 / bpm * 0.75, 0.28);
   delay.wet.value = 0.24;
@@ -526,7 +695,7 @@ function makeSymphonicLead(out, bpm) {
     filter: { type: "lowpass", Q: 1 },
     filterEnvelope: { attack: 0.02, decay: 0.3, sustain: 0.8, release: 0.4, baseFrequency: 1200, octaves: 2.2 }
   });
-  synth.volume.value = -9;
+  synth.volume.value = -4;
   const vibrato = new Tone.Vibrato(5, 0.07);
   const delay = new Tone.FeedbackDelay(60 / bpm / 2, 0.25);
   delay.wet.value = 0.2;
@@ -729,8 +898,203 @@ function makeDrumKit(out, opts = {}) {
     }
   };
 }
-function voiceForTrack(track, bpm, out) {
+function makeSampler(def, out, exposeCutoff = false, stereo) {
+  const useStereo = !!(def.doubleTrack && stereo);
+  const dynamic = !exposeCutoff;
+  const created = [];
+  const buildPath = (dest) => {
+    const sampler = new Tone.Sampler({
+      urls: def.urls,
+      baseUrl: resolveSampleBase(def.baseUrl),
+      release: def.release ?? 0.4,
+      attack: def.attack ?? 0
+    });
+    sampler.volume.value = def.volumeDb ?? -6;
+    const chain = [];
+    if (def.vibrato) {
+      const vib = new Tone.Vibrato(def.vibrato.rate, def.vibrato.depth);
+      chain.push(vib);
+    }
+    if (def.distortion) {
+      const dist = new Tone.Distortion(def.distortion);
+      dist.oversample = "2x";
+      dist.wet.value = 0.9;
+      chain.push(dist);
+    }
+    if (def.cab) chain.push(new Tone.Filter(def.cab.hp, "highpass"));
+    const bright = new Tone.Filter(def.cab?.lp ?? (exposeCutoff ? 12e3 : 16e3), "lowpass");
+    chain.push(bright);
+    sampler.chain(...chain, dest);
+    created.push(sampler, ...chain);
+    return { sampler, bright };
+  };
+  const paths = [];
+  if (useStereo) {
+    for (let i = 0; i < 2; i++) {
+      const pan = new Tone.Panner(i === 0 ? -stereo.spread : stereo.spread);
+      pan.connect(stereo.bus);
+      created.push(pan);
+      if (stereo.send > 0) {
+        const g = new Tone.Gain(stereo.send);
+        pan.connect(g);
+        g.connect(stereo.reverb);
+        created.push(g);
+      }
+      paths.push(buildPath(pan));
+    }
+  } else {
+    paths.push(buildPath(out));
+  }
+  const brightHzFor = (d, v) => {
+    let hz;
+    if (def.palmMute) {
+      const open = Math.min(1, d / 0.22);
+      hz = 1100 + 5e3 * open * (0.55 + 0.45 * v);
+    } else {
+      hz = 2200 + 13800 * Math.min(1, v * v);
+    }
+    return def.cab ? Math.min(hz, def.cab.lp) : hz;
+  };
+  let trigger = (p, t, d, v) => {
+    const hz = brightHzFor(d, v);
+    paths.forEach((path, i) => {
+      if (dynamic) {
+        try {
+          path.bright.frequency.setValueAtTime(hz, Math.max(0, t - 1e-3));
+        } catch {
+        }
+      }
+      const tt = useStereo && i === 1 ? t + 0.012 : t;
+      path.sampler.triggerAttackRelease(midiHz(p), Math.max(0.05, d), tt, v);
+    });
+  };
+  if (def.monophonic) trigger = monoGuard(trigger);
+  return {
+    trigger,
+    cutoff: useStereo ? void 0 : paths[0].bright.frequency,
+    ready: Tone.loaded(),
+    dispose: () => {
+      for (const n of created) n.dispose();
+    }
+  };
+}
+var VOICE_PAN = { chords: 0.22, arp: -0.2, counter: 0.3, lead: 0, bass: 0 };
+var VOICE_SEND = {
+  lead: 0.2,
+  chords: 0.32,
+  bass: 0.04,
+  arp: 0.12,
+  drums: 0.08,
+  counter: 0.2,
+  fx: 0.16
+};
+var DRUM_LANE_PAN = {
+  kick: 0,
+  snare: 0,
+  hatClosed: 0.22,
+  hatOpen: 0.28,
+  crash: -0.35,
+  tomHigh: 0.3,
+  tomLow: -0.3,
+  clap: -0.18
+};
+function makeRealDrumKit(out, def, opts = {}) {
+  const kitGain = new Tone.Gain(1);
+  kitGain.connect(out);
+  let sendGain = null;
+  if (opts.reverb && opts.send && opts.send > 0) {
+    sendGain = new Tone.Gain(opts.send);
+    kitGain.connect(sendGain);
+    sendGain.connect(opts.reverb);
+  }
+  const lanePanners = {};
+  for (const laneName of Object.keys(def.lanes)) {
+    const p = new Tone.Panner(DRUM_LANE_PAN[laneName] ?? 0);
+    p.connect(kitGain);
+    lanePanners[laneName] = p;
+  }
+  const fileToPlayer = {};
+  for (const [laneName, lane] of Object.entries(def.lanes))
+    for (const layer of lane.layers)
+      for (const f of layer.rr) {
+        const key = f.replace(/\.mp3$/, "");
+        const pl = new Tone.Player({ url: resolveSampleBase(def.baseUrl) + f, volume: -3 });
+        pl.connect(lanePanners[laneName]);
+        fileToPlayer[key] = pl;
+      }
+  const NOTE_TO_LANE = {
+    [GM_DRUMS.kick]: "kick",
+    [GM_DRUMS.snare]: "snare",
+    [GM_DRUMS.hatClosed]: "hatClosed",
+    [GM_DRUMS.hatOpen]: "hatOpen",
+    [GM_DRUMS.crash]: "crash",
+    [GM_DRUMS.ride]: "crash",
+    [GM_DRUMS.tomHigh]: "tomHigh",
+    [GM_DRUMS.tomMid]: "tomLow",
+    [GM_DRUMS.tomLow]: "tomLow",
+    [GM_DRUMS.clap]: "clap",
+    [GM_DRUMS.tambourine]: "hatClosed",
+    [GM_DRUMS.shaker]: "hatClosed"
+  };
+  const rng = makeRng(2654435769);
+  const lastRr = /* @__PURE__ */ new Map();
+  const lastLayer = /* @__PURE__ */ new Map();
+  const lastStart = /* @__PURE__ */ new Map();
+  return {
+    ready: Tone.loaded(),
+    trigger: (pitch, t, _d, v) => {
+      const lane = NOTE_TO_LANE[pitch];
+      if (!lane) return;
+      const laneDef = def.lanes[lane];
+      if (!laneDef) return;
+      v = Math.max(0.06, Math.min(1, v));
+      let li = laneDef.layers.findIndex((l) => v <= l.vMax);
+      if (li < 0) li = laneDef.layers.length - 1;
+      const prevLi = lastLayer.get(lane);
+      if (prevLi !== void 0 && Math.abs(li - prevLi) === 1) {
+        const boundary = laneDef.layers[Math.min(li, prevLi)].vMax;
+        if (Math.abs(v - boundary) < 0.06) li = prevLi;
+      }
+      lastLayer.set(lane, li);
+      const layer = laneDef.layers[li];
+      const key = `${lane}:${li}`;
+      const prev = lastRr.get(key);
+      const ri = prev === void 0 ? 0 : (prev + 1) % layer.rr.length;
+      lastRr.set(key, ri);
+      const file = layer.rr[ri].replace(/\.mp3$/, "");
+      const pl = fileToPlayer[file];
+      if (!pl) return;
+      const ls = lastStart.get(file) ?? -1;
+      if (t <= ls + 2e-3) t = ls + 2e-3;
+      lastStart.set(file, t);
+      pl.volume.value = Tone.gainToDb(0.5 + 0.5 * v) + (rng() - 0.5);
+      pl.playbackRate = 1 + (rng() - 0.5) * 0.012;
+      try {
+        pl.start(t);
+      } catch {
+        return;
+      }
+      if (lane === "kick") opts.onKick?.(t);
+    },
+    dispose: () => {
+      for (const pl of Object.values(fileToPlayer)) pl.dispose();
+      for (const p of Object.values(lanePanners)) p.dispose();
+      sendGain?.dispose();
+      kitGain.dispose();
+    }
+  };
+}
+function voiceForTrack(track, bpm, out, real, autoTarget, stereoCtx) {
   if (track.role === "drums") return makeDrumKit(out);
+  if (real) {
+    const set = REAL_PROGRAM_MAP[track.program];
+    if (set) {
+      const def = SAMPLE_SETS[set];
+      const exposeCutoff = autoTarget === track.role;
+      const stereo = def.doubleTrack && stereoCtx ? { bus: stereoCtx.bus, reverb: stereoCtx.reverb, send: VOICE_SEND[track.role] ?? 0.12, spread: 0.75 } : void 0;
+      return makeSampler(def, out, exposeCutoff, stereo);
+    }
+  }
   switch (track.program) {
     case 80:
       return makeSquareLead(out, bpm);
@@ -869,7 +1233,8 @@ function buildFilterAutomations(song, cutoff) {
   }
   return automations;
 }
-function buildEnsemble(song) {
+function buildEnsemble(song, opts = {}) {
+  const real = opts.real ?? false;
   const spec = getGenre(song.genre).filterAutomation;
   const bus = new Tone.Gain(0.9);
   const subCut = new Tone.Filter(30, "highpass");
@@ -880,6 +1245,24 @@ function buildEnsemble(song) {
   bus.chain(subCut, ...masterFilter ? [masterFilter] : [], ...fx, compressor, limiter, Tone.getDestination());
   const isPhonk = song.genre === "phonk";
   const extras = [];
+  const reverb = real ? new Tone.Reverb({ decay: 1.8, wet: 1 }) : null;
+  reverb?.connect(bus);
+  if (reverb) extras.push(reverb);
+  const spatials = [];
+  const spatialOut = (role) => {
+    if (!real || !reverb) return bus;
+    const pan = new Tone.Panner(VOICE_PAN[role] ?? 0);
+    pan.connect(bus);
+    const send = VOICE_SEND[role] ?? 0.1;
+    if (send > 0) {
+      const g = new Tone.Gain(send);
+      pan.connect(g);
+      g.connect(reverb);
+      spatials.push(g);
+    }
+    spatials.push(pan);
+    return pan;
+  };
   if (song.genre === "noir") {
     const rain = new Tone.Noise("pink");
     rain.volume.value = -41;
@@ -922,15 +1305,28 @@ function buildEnsemble(song) {
   const voices = song.tracks.map((t) => {
     if (isPhonk && t.role === "drums") return makeDrumKit(bus, { hatBus: duck, onKick });
     if (isPhonk && t.role === "lead") return makePhonkCowbell(duck);
-    if (song.genre === "noir" && t.role === "drums") return makeDrumKit(bus, { dullKick: true });
-    if ((song.genre === "doomerwave" || song.genre === "doomerrun") && t.role === "drums")
-      return makeDrumKit(bus, { softKick: true, gatedSnare: true });
-    return voiceForTrack(t, song.bpm, bus);
+    if (t.role === "drums") {
+      const kit = real ? REAL_DRUM_KITS[song.genre] : void 0;
+      if (kit) return makeRealDrumKit(bus, kit, { onKick, reverb: reverb ?? void 0, send: VOICE_SEND.drums });
+      if (song.genre === "noir") return makeDrumKit(bus, { dullKick: true });
+      if (song.genre === "doomerwave" || song.genre === "doomerrun")
+        return makeDrumKit(bus, { softKick: true, gatedSnare: true });
+      return makeDrumKit(bus);
+    }
+    return voiceForTrack(
+      t,
+      song.bpm,
+      spatialOut(t.role),
+      real,
+      spec?.target,
+      real && reverb ? { bus, reverb } : void 0
+    );
   });
   const cutoffOf = (target) => target === "master" ? masterFilter?.frequency : voices[song.tracks.findIndex((t) => t.role === target)]?.cutoff;
   const automations = spec ? buildFilterAutomations(song, cutoffOf(spec.target)) : [];
   const ready = Promise.all([
     ...fx.filter((n) => n instanceof Tone.Reverb).map((n) => n.ready),
+    ...reverb ? [reverb.ready] : [],
     ...voices.map((v) => v.ready ?? Promise.resolve())
   ]);
   return {
@@ -939,6 +1335,7 @@ function buildEnsemble(song) {
     ready,
     dispose: () => {
       for (const v of voices) v.dispose();
+      for (const s of spatials) s.dispose();
       for (const x of extras) x.dispose();
       bus.dispose();
       subCut.dispose();
@@ -950,17 +1347,81 @@ function buildEnsemble(song) {
   };
 }
 
+// src/audio/perform.ts
+function makeRng2(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var roleSeed = {
+  lead: 4369,
+  chords: 8738,
+  bass: 13107,
+  drums: 17476,
+  arp: 21845,
+  counter: 26214,
+  fx: 30583
+};
+var FEEL = {
+  lead: { jitterMs: 12, pushMs: 2, velSpread: 0.1, legato: true },
+  chords: { jitterMs: 9, pushMs: 4, velSpread: 0.08, legato: true },
+  bass: { jitterMs: 4, pushMs: 0, velSpread: 0.07, legato: false },
+  arp: { jitterMs: 5, pushMs: 0, velSpread: 0.09, legato: false },
+  // Drums stay tight: heavy timing jitter turns fast rolls/blasts into sloppy
+  // stumbles, and wide velocity jitter flickers the kit's velocity layers.
+  drums: { jitterMs: 1.5, pushMs: 0, velSpread: 0.05, legato: false },
+  counter: { jitterMs: 8, pushMs: 2, velSpread: 0.09, legato: true },
+  fx: { jitterMs: 6, pushMs: 0, velSpread: 0.06, legato: false }
+};
+function perform(track, song) {
+  const secPerTick = 60 / song.bpm / PPQ;
+  const beatTicks = PPQ * 4 / song.timeSig[1];
+  const barTicks = song.timeSig[0] * beatTicks;
+  const feel = FEEL[track.role];
+  const rng = makeRng2((Number(song.seed & 0xffffffffn) ^ roleSeed[track.role]) >>> 0);
+  const notes = [...track.notes].sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+  return notes.map((n, i) => {
+    const tickInBar = (n.start % barTicks + barTicks) % barTicks;
+    const onBeat = tickInBar % beatTicks === 0;
+    const downBeat = tickInBar === 0;
+    let offMs = feel.pushMs + (rng() - 0.5) * 2 * feel.jitterMs;
+    if (track.role === "drums" && n.pitch === GM_DRUMS.snare) offMs += 2;
+    const time = Math.max(0, n.start * secPerTick + offMs / 1e3);
+    let vel = n.vel / 127;
+    if (downBeat) vel += 0.08;
+    else if (onBeat) vel += 0.04;
+    else vel -= 0.03;
+    vel += (rng() - 0.5) * 2 * feel.velSpread;
+    vel = Math.max(0.05, Math.min(1, vel));
+    let dur = n.dur * secPerTick * (0.9 + 0.3 * vel);
+    if (feel.legato) {
+      const next = notes[i + 1];
+      if (next) {
+        const gapSec = (next.start - n.start) * secPerTick;
+        if (gapSec > 0 && gapSec < 2) dur = Math.max(dur, gapSec * 0.97);
+      }
+    }
+    dur = Math.max(0.02, dur);
+    return { time, pitch: n.pitch, dur, vel, slide: n.slide };
+  });
+}
+
 // src/audio/offline.ts
-async function renderSong(song) {
+async function renderSong(song, opts = {}) {
   const secPerTick = 60 / song.bpm / PPQ;
   const durationSec = song.durationTicks * secPerTick + 2;
+  const real = opts.real ?? false;
   const toneBuffer = await Tone2.Offline(
     async ({ transport }) => {
-      const ensemble = buildEnsemble(song);
+      const ensemble = buildEnsemble(song, { real });
       await ensemble.ready;
       song.tracks.forEach((track, i) => {
         const voice = ensemble.voices[i];
-        const events = track.notes.map((n) => ({
+        const events = real ? perform(track, song) : track.notes.map((n) => ({
           time: n.start * secPerTick,
           pitch: n.pitch,
           dur: Math.max(0.02, n.dur * secPerTick),
@@ -968,7 +1429,10 @@ async function renderSong(song) {
           slide: n.slide
         }));
         new Tone2.Part((time, ev) => {
-          voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
+          try {
+            voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
+          } catch {
+          }
         }, events).start(0);
       });
       for (const a of ensemble.automations) {
@@ -1063,10 +1527,11 @@ function createPlayer(song, opts = {}) {
     }
   };
   const build = () => {
-    ensemble = buildEnsemble(song);
+    const real = opts.real ?? false;
+    ensemble = buildEnsemble(song, { real });
     parts = song.tracks.map((track, i) => {
       const voice = ensemble.voices[i];
-      const events = track.notes.map((n) => ({
+      const events = real ? perform(track, song) : track.notes.map((n) => ({
         time: n.start * secPerTick,
         pitch: n.pitch,
         dur: Math.max(0.02, n.dur * secPerTick),
@@ -1074,7 +1539,10 @@ function createPlayer(song, opts = {}) {
         slide: n.slide
       }));
       const part = new Tone3.Part((time, ev) => {
-        voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
+        try {
+          voice.trigger(ev.pitch, time, ev.dur, ev.vel, ev.slide);
+        } catch {
+        }
       }, events);
       part.start(0);
       return part;
@@ -1130,8 +1598,8 @@ function createPlayer(song, opts = {}) {
 }
 
 // src/audio/index.ts
-async function renderToWav(song) {
-  return audioBufferToWav(await renderSong(song));
+async function renderToWav(song, opts = {}) {
+  return audioBufferToWav(await renderSong(song, { real: opts.real }));
 }
 export {
   audioBufferToWav,

@@ -25,10 +25,13 @@ interface Player {
  */
 declare function createPlayer(song: Song, opts?: {
     loop?: boolean;
+    real?: boolean;
 }): Player;
 
 /**
- * Tone.js voices for song tracks. Pure synthesis — no samples, no network.
+ * Tone.js voices for song tracks. Synthesis by default; the "real" mode swaps
+ * in sampled instruments (Tone.Sampler / Tone.Players from /samples — see
+ * samples.ts), falling back to synth for any program without a sample.
  *
  * Nodes are created against the CURRENT Tone context: call buildEnsemble()
  * live for playback, or inside Tone.Offline() for rendering — same code path
@@ -56,14 +59,18 @@ interface Ensemble {
     ready: Promise<unknown>;
     dispose(): void;
 }
-declare function buildEnsemble(song: Song): Ensemble;
+declare function buildEnsemble(song: Song, opts?: {
+    real?: boolean;
+}): Ensemble;
 
 /**
  * Render a song to a PCM buffer with Tone.Offline. The SAME buildEnsemble()
  * runs here as in live playback — Tone swaps the global context inside the
  * callback, so the graph builds against the offline context for free.
  */
-declare function renderSong(song: Song): Promise<AudioBuffer>;
+declare function renderSong(song: Song, opts?: {
+    real?: boolean;
+}): Promise<AudioBuffer>;
 
 /** AudioBuffer → 16-bit PCM WAV blob. */
 declare function audioBufferToWav(buffer: AudioBuffer): Blob;
@@ -77,6 +84,8 @@ declare function audioBufferToWav(buffer: AudioBuffer): Blob;
  */
 
 /** Render a song offline and pack it as a WAV blob. */
-declare function renderToWav(song: Song): Promise<Blob>;
+declare function renderToWav(song: Song, opts?: {
+    real?: boolean;
+}): Promise<Blob>;
 
 export { type Ensemble, type EnsembleAutomation, type Player, type Voice, audioBufferToWav, buildEnsemble, createPlayer, renderSong, renderToWav };

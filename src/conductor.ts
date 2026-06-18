@@ -88,7 +88,7 @@ export class Conductor {
   // и ведёт. Дакаем ТОЛЬКО лид, остальной микс (барабаны/бас/гармония) полный.
   private leadGuide = 0.5;
   /** Уровень лид-гида 0..1: 1 — лид на полную, ~0.3 — тихий гид под сбором. */
-  setLeadGuide(g: number) { this.leadGuide = Math.max(0.15, Math.min(1, g)); }
+  setLeadGuide(g: number) { this.leadGuide = Math.max(0.4, Math.min(1, g)); }
 
   /** Подвесить трек со сдвигом startOffsetSec по глобальному транспорту. */
   addStem(song: Song, startOffsetSec: number): Stem {

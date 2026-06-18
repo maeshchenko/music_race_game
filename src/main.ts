@@ -135,7 +135,7 @@ function nextEndlessSong(): Promise<Song> {
 }
 
 // первые три заезда сессии — фиксированный порядок, дальше полностью случайно
-const PLANNED_GENRES: GameGenre[] = ['grimerun', 'doomerrun', 'nightcorerun'];
+const PLANNED_GENRES: GameGenre[] = ['doomerrun', 'nightcorerun', 'grimerun'];
 let plannedIdx = 0;
 const nextGenre = (): GameGenre =>
   plannedIdx < PLANNED_GENRES.length

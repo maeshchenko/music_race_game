@@ -1217,7 +1217,7 @@ export class Game {
       // До ПЕРВОГО собранного блока мелодия полная (едешь к блоку — ничего не гаснет).
       if (!this.engaged) { this.leadHealth = 1; this.leadFading = false; }
       else if (this.leadFading) this.leadHealth = Math.max(0, this.leadHealth - dt / 1.3);
-      this.conductor?.setLeadGuide(0.12 + this.leadHealth * 0.88);
+      this.conductor?.setLeadGuide(0.4 + this.leadHealth * 0.6);
     }
     const beatEnv = Math.max(0, 1 - ((t * this.bpm / 60) % 1) * 3.2);
 
