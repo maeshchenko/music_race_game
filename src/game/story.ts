@@ -91,7 +91,7 @@ export const PHASES: PhaseDef[] = [
     ] },
   { phase: 'grove', startDist: 4150, blendIn: 90, theme: GROVE, propSet: 'grove', insanity: 0, audioRate: 0.4, camera: 'foot',
     narrate: [ // лес расцветает; голос удивлён красотой, теплеет
-      { atOff: 0, text: 'Смотри. Светлячки. Я и не знал, что они здесь есть.' },
+      { atOff: 0, text: 'Смотри. Светлячки. Откуда они тут в это время года?' },
       { atOff: 120, text: 'И птицы…' },
     ] },
   { phase: 'lake', startDist: 4300, blendIn: 90, theme: LAKE, propSet: 'lake', insanity: 0, audioRate: 0.3, camera: 'lakesit', freezeAfter: 70,
